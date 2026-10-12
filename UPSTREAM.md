@@ -7,3 +7,5 @@
 - SYSVIPC KABI adaptation: based on [Droidspaces 6.1-compatible patch](https://github.com/ravindu644/Droidspaces-OSS/blob/b48a01de6b7d5f346f7c5028ac7959ddb3561237/Documentation/resources/kernel-patches/GKI/below-kernel-6.12/001.GKI-below-6.12-fix_sysvipc_kabi_6_7_8.patch), adjusted for the pinned OnePlus kernel. Retain Droidspaces attribution and applicable upstream terms.
 
 A future public binary distribution must provide complete corresponding source as required by the applicable licenses. No device image, firmware, private config, auth material or vendor binary is distributed.
+
+Source archive integrity uses normalized tar-entry fingerprints (content, paths, modes and links) pinned in `sources.lock.json`, not compressed tar.gz SHA-256 bytes, which upstream archives can change even at a fixed revision. Original compressed checksums are kept as non-authoritative references.

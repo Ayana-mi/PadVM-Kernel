@@ -22,9 +22,12 @@ fetch_archive() {
     local kind="$1" dest="$2" mode="${3:-}" archive="$WORK/$1.tar.gz"
     local url sha
     url="$(lockval "$kind.url")"
-    sha="$(lockval "$kind.sha256")"
+    sha="$(lockval "$kind.content_sha256")"
+    echo "Fetching pinned source component: $kind"
     curl --fail --location --retry 3 --silent --show-error "$url" -o "$archive"
-    echo "$sha  $archive" | sha256sum --check --status
+    # Generated GitHub/Gitiles tar.gz bytes are not a stable integrity anchor.
+    # Verify exact names, modes, links and file bytes against our pinned content manifest.
+    python3 "$ROOT/scripts/verify-archive.py" "$archive" --expected "$sha"
     if [[ "$mode" == "strip" ]]; then
         tar -xzf "$archive" -C "$dest" --strip-components=1
     else

@@ -12,8 +12,16 @@ class StagedBuildTests(unittest.TestCase):
         self.assertEqual(lock['kernel']['commit'],'c90a943feed12176302cd479087bf7aa955486e4')
         self.assertEqual(lock['bakasu']['commit'],'f6cb7e70c10ebde149f3121ae68b945514fd0801')
         self.assertEqual(lock['kabi_patch_origin']['commit'],'b48a01de6b7d5f346f7c5028ac7959ddb3561237')
+        pinned_content = {
+            'kernel': '4924d3639c1ec794f985109ad0f30b3e71757d0066093fff33394351ef3dd489',
+            'clang': 'd5fbf3fdef3f0bb7f250af4abecdf2db09f4b6f9e06300a30428a10bcf84a9ef',
+            'build_tools': 'b374894ab59bff74c5065e280e68d1a9b3c60b6bc02513a2fc2b7a97fe7d3d6d',
+        }
+        for name, expected in pinned_content.items():
+            self.assertEqual(lock[name]['content_sha256'], expected)
         for kind in ('kernel','clang','build_tools'):
-            self.assertEqual(len(lock[kind]['sha256']),64)
+            self.assertEqual(len(lock[kind]['content_sha256']),64)
+            self.assertEqual(len(lock[kind]['archive_sha256_reference']),64)
             self.assertIn(lock[kind]['commit'],lock[kind]['url'])
     def test_config_negative_and_positive(self):
         required=ROOT/'configs/required.config'
