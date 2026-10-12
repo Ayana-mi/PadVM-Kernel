@@ -11,6 +11,7 @@ class StagedBuildTests(unittest.TestCase):
         lock=json.loads((ROOT/'sources.lock.json').read_text())
         self.assertEqual(lock['kernel']['commit'],'c90a943feed12176302cd479087bf7aa955486e4')
         self.assertEqual(lock['bakasu']['commit'],'f6cb7e70c10ebde149f3121ae68b945514fd0801')
+        self.assertEqual(lock['kabi_patch_origin']['commit'],'b48a01de6b7d5f346f7c5028ac7959ddb3561237')
         for kind in ('kernel','clang','build_tools'):
             self.assertEqual(len(lock[kind]['sha256']),64)
             self.assertIn(lock[kind]['commit'],lock[kind]['url'])

@@ -4,6 +4,6 @@
 - OnePlusOSS [modules and device tree](https://github.com/OnePlusOSS/android_kernel_modules_and_devicetree_oneplus_mt6897): pinned reference only, not uploaded or redistributed here.
 - [BakaSU](https://github.com/Baka-SU/BakaSU) (formerly ReSukiSU): pinned main commit; kernel subtree GPL-2.0-only, manager/application and assets have different licensing; no APK included.
 - Android Clang and Android kernel build tools: pinned Android public source archives, copyright notices remain with upstream.
-- SYSVIPC KABI adaptation: derived from Droidspaces' Android ABI-compatible SYSVIPC relocation approach; adjusted for the pinned OnePlus kernel. Preserve upstream authors' rights and GPL-2.0-only applicability.
+- SYSVIPC KABI adaptation: based on [Droidspaces 6.1-compatible patch](https://github.com/ravindu644/Droidspaces-OSS/blob/b48a01de6b7d5f346f7c5028ac7959ddb3561237/Documentation/resources/kernel-patches/GKI/below-kernel-6.12/001.GKI-below-6.12-fix_sysvipc_kabi_6_7_8.patch), adjusted for the pinned OnePlus kernel. Retain Droidspaces attribution and applicable upstream terms.
 
 A future public binary distribution must provide complete corresponding source as required by the applicable licenses. No device image, firmware, private config, auth material or vendor binary is distributed.
