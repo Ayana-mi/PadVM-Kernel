@@ -46,8 +46,9 @@ class StagedBuildTests(unittest.TestCase):
             'vendor/oplus/kernel/storage',
             'vendor/oplus/kernel/cpu',
             'vendor_reference.commit',
-            'kernel/oplus_cpu/Kconfig',
-            'drivers/soc/oplus/oplus_resctrl/Kconfig',
+            'vendor/oplus/kernel/synchronize',
+            'vendor/oplus/kernel/mm/mm_osvelte',
+            'verify-vendor-links.py',
         ):
             self.assertIn(requirement,script)
         self.assertNotIn('git pull', script)

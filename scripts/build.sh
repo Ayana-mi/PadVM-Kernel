@@ -50,18 +50,17 @@ git -C "$VENDOR" sparse-checkout init --cone
 git -C "$VENDOR" sparse-checkout set \
     vendor/oplus/kernel/oplus_performance/oplus_resctrl \
     vendor/oplus/kernel/storage \
-    vendor/oplus/kernel/cpu
+    vendor/oplus/kernel/cpu \
+    vendor/oplus/kernel/synchronize \
+    vendor/oplus/kernel/mm/mm_osvelte
 git -C "$VENDOR" fetch --quiet --filter=blob:none --depth=1 origin "$(lockval vendor_reference.commit)"
 git -C "$VENDOR" -c advice.detachedHead=false checkout -q --detach FETCH_HEAD
 test "$(git -C "$VENDOR" rev-parse HEAD)" = "$(lockval vendor_reference.commit)"
 mkdir -p "$WORK/vendor"
 ln -s ../vendor-modules/vendor/oplus "$WORK/vendor/oplus"
-for required in \
-    "$SRC/drivers/soc/oplus/oplus_resctrl/Kconfig" \
-    "$SRC/drivers/soc/oplus/storage/Kconfig" \
-    "$SRC/kernel/oplus_cpu/Kconfig"; do
-    test -f "$required" || { echo "Missing pinned vendor source needed by Kconfig" >&2; exit 1; }
-done
+# Check every original external symlink, not just the initial Kconfig entries.
+# Otherwise a compilation can fail minutes later due to a dangling header.
+python3 "$ROOT/scripts/verify-vendor-links.py" "$SRC"
 export PATH="$CLANG/bin:$TOOLS/bin:$PATH"
 export KBUILD_BUILD_USER=Ayana-mi
 export KBUILD_BUILD_HOST=github-actions
