@@ -39,6 +39,29 @@ echo '[1/5] Exact upstream source archives'
 fetch_archive kernel "$SRC" strip
 fetch_archive clang "$CLANG"
 fetch_archive build_tools "$TOOLS"
+
+# Official kernel contains symlinks into sibling vendor and oplus_cpu trees.
+# Sparse fetch from the exact pinned public OnePlusOSS modules revision.
+echo 'Fetching pinned vendor Kconfig and Oplus source directories'
+VENDOR="$WORK/vendor-modules"
+git init -q "$VENDOR"
+git -C "$VENDOR" remote add origin "https://github.com/$(lockval vendor_reference.repo).git"
+git -C "$VENDOR" sparse-checkout init --cone
+git -C "$VENDOR" sparse-checkout set \
+    vendor/oplus/kernel/oplus_performance/oplus_resctrl \
+    vendor/oplus/kernel/storage \
+    vendor/oplus/kernel/cpu
+git -C "$VENDOR" fetch --quiet --filter=blob:none --depth=1 origin "$(lockval vendor_reference.commit)"
+git -C "$VENDOR" -c advice.detachedHead=false checkout -q --detach FETCH_HEAD
+test "$(git -C "$VENDOR" rev-parse HEAD)" = "$(lockval vendor_reference.commit)"
+mkdir -p "$WORK/vendor"
+ln -s ../vendor-modules/vendor/oplus "$WORK/vendor/oplus"
+for required in \
+    "$SRC/drivers/soc/oplus/oplus_resctrl/Kconfig" \
+    "$SRC/drivers/soc/oplus/storage/Kconfig" \
+    "$SRC/kernel/oplus_cpu/Kconfig"; do
+    test -f "$required" || { echo "Missing pinned vendor source needed by Kconfig" >&2; exit 1; }
+done
 export PATH="$CLANG/bin:$TOOLS/bin:$PATH"
 export KBUILD_BUILD_USER=Ayana-mi
 export KBUILD_BUILD_HOST=github-actions

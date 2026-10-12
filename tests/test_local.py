@@ -33,6 +33,26 @@ class StagedBuildTests(unittest.TestCase):
             config.write_text('CONFIG_KSU=y\n')
             bad=subprocess.run(['python3',str(ROOT/'scripts/verify-config.py'),str(config),str(required)],capture_output=True)
             self.assertNotEqual(bad.returncode,0)
+    def test_official_vendor_tree_is_pinned_and_integrated(self):
+        lock=json.loads((ROOT/'sources.lock.json').read_text())
+        self.assertEqual(
+            lock['vendor_reference']['commit'],
+            '76792af3e1fefabd34be6dd684bfc9facc4d5b17'
+        )
+        script=(ROOT/'scripts/build.sh').read_text()
+        for requirement in (
+            'sparse-checkout set',
+            'vendor/oplus/kernel/oplus_performance/oplus_resctrl',
+            'vendor/oplus/kernel/storage',
+            'vendor/oplus/kernel/cpu',
+            'vendor_reference.commit',
+            'kernel/oplus_cpu/Kconfig',
+            'drivers/soc/oplus/oplus_resctrl/Kconfig',
+        ):
+            self.assertIn(requirement,script)
+        self.assertNotIn('git pull', script)
+        self.assertNotIn('curl | bash', script)
+
     def test_config_artifact_included(self):
         workflow=(ROOT/'.github/workflows/build.yml').read_text()
         self.assertIn('include-hidden-files: true',workflow)
