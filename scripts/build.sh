@@ -73,8 +73,8 @@ CFG="$SRC/scripts/config"
 make -C "$SRC" O="$OUT" ARCH=arm64 LLVM=1 LLVM_IAS=1 -j1 olddefconfig
 python3 "$ROOT/scripts/verify-config.py" "$OUT/.config" "$ROOT/configs/required.config"
 
-echo '[5/5] Full Image and modules, single worker'
-make -C "$SRC" O="$OUT" ARCH=arm64 LLVM=1 LLVM_IAS=1 -j1 Image modules
+echo '[5/5] Full Image and modules, all runner cores'
+make -C "$SRC" O="$OUT" ARCH=arm64 LLVM=1 LLVM_IAS=1 -j"$(nproc)" Image modules
 test -s "$OUT/arch/arm64/boot/Image"
 test -s "$OUT/Module.symvers"
 mkdir -p "$ROOT/.build/artifact"
