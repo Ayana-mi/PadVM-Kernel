@@ -8,6 +8,8 @@ Experimental OnePlus Pad (OPD2407 / MT6897) Linux 6.1.134 kernel build.
 - Pinned OnePlusOSS 6.1.134 Android14 source
 - BakaSU (formerly ReSukiSU), pinned development revision, built in
 - MediaTek GZVM built in (build-time experiment only)
+- Baseband-guard (BBG) LSM, pinned
+- Oplus security/tuning vendor modules blocked via `module_blacklist=`
 - No SuSFS
 - Manual GitHub-hosted Actions build; no automatic Release
 

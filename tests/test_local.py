@@ -54,6 +54,16 @@ class StagedBuildTests(unittest.TestCase):
         self.assertNotIn('git pull', script)
         self.assertNotIn('curl | bash', script)
 
+    def test_bbg_and_blocklist(self):
+        lock=json.loads((ROOT/'sources.lock.json').read_text())
+        self.assertEqual(lock['bbg']['commit'],'a54e0dc6cf0aff4dd87fec49644a02d2eb612905')
+        required=(ROOT/'configs/required.config').read_text()
+        self.assertIn('CONFIG_BBG=y',required)
+        self.assertIn('baseband_guard',required)
+        self.assertIn('module_blacklist=',required)
+        self.assertIn('oplus_secure_guard',required)
+        script=(ROOT/'scripts/build.sh').read_text()
+        self.assertNotIn('setup.sh',script)
     def test_config_artifact_included(self):
         workflow=(ROOT/'.github/workflows/build.yml').read_text()
         self.assertIn('include-hidden-files: true',workflow)

@@ -33,5 +33,9 @@
     "repo": "ravindu644/Droidspaces-OSS",
     "commit": "b48a01de6b7d5f346f7c5028ac7959ddb3561237",
     "path": "Documentation/resources/kernel-patches/GKI/below-kernel-6.12/001.GKI-below-6.12-fix_sysvipc_kabi_6_7_8.patch"
+  },
+  "bbg": {
+    "repo": "vc-teahouse/Baseband-guard",
+    "commit": "a54e0dc6cf0aff4dd87fec49644a02d2eb612905"
   }
 }

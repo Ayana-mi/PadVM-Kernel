@@ -72,7 +72,7 @@ command -v pahole >/dev/null
 echo '[2/5] Official baseline configuration'
 make -C "$SRC" O="$OUT" ARCH=arm64 LLVM=1 LLVM_IAS=1 -j1 gki_defconfig
 
-echo '[3/5] Fetch pinned BakaSU revision'
+echo '[3/5] Fetch pinned BakaSU and BBG revisions'
 BAKASU="$SRC/KernelSU"
 git init -q "$BAKASU"
 git -C "$BAKASU" remote add origin https://github.com/Baka-SU/BakaSU.git
@@ -89,12 +89,34 @@ ln -s ../KernelSU/kernel "$SRC/drivers/kernelsu"
 printf '\nobj-$(CONFIG_KSU) += kernelsu/\n' >> "$SRC/drivers/Makefile"
 printf '\nsource "drivers/kernelsu/Kconfig"\n' >> "$SRC/drivers/Kconfig"
 
+echo 'Fetch pinned Baseband-guard (BBG) revision'
+# Full clone: BBG's Makefile would otherwise try to unshallow during make.
+BBG="$SRC/Baseband-guard"
+git clone --quiet "https://github.com/$(lockval bbg.repo).git" "$BBG"
+git -C "$BBG" -c advice.detachedHead=false checkout --quiet --detach "$(lockval bbg.commit)"
+test "$(git -C "$BBG" rev-parse HEAD)" = "$(lockval bbg.commit)"
+# Same integration as the upstream install script for DEFINE_LSM kernels; that script is not run.
+test ! -e "$SRC/security/baseband-guard"
+ln -s ../Baseband-guard "$SRC/security/baseband-guard"
+printf '\nobj-$(CONFIG_BBG) += baseband-guard/\n' >> "$SRC/security/Makefile"
+awk '{a[NR]=$0} END{last=0; for(i=1;i<=NR;i++) if(a[i] ~ /^endmenu[[:space:]]*$/) last=i;
+     for(i=1;i<=NR;i++){ if(i==last) print "source \"security/baseband-guard/Kconfig\""; print a[i] }}' \
+    "$SRC/security/Kconfig" > "$SRC/security/Kconfig.new"
+mv "$SRC/security/Kconfig.new" "$SRC/security/Kconfig"
+grep -q 'security/baseband-guard/Kconfig' "$SRC/security/Kconfig"
+
 echo '[4/5] KABI patch and required config (no SuSFS)'
 patch -d "$SRC" -p1 --batch --forward < "$ROOT/patches/pad-sysvipc-kabi.patch"
 CFG="$SRC/scripts/config"
 "$CFG" --file "$OUT/.config" --set-str LOCALVERSION '-android14-PADVM-0.1.0' --disable LOCALVERSION_AUTO
 "$CFG" --file "$OUT/.config" --enable KSU --enable KSU_TRACEPOINT_HOOK --disable KSU_SUSFS --enable MTK_GZVM
 "$CFG" --file "$OUT/.config" --enable DEBUG_INFO_BTF --enable LTO_CLANG --enable LTO_CLANG_THIN --enable CFI_CLANG
+# Baseband-guard LSM; boot/recovery partition blocking stays off (upstream default).
+"$CFG" --file "$OUT/.config" --enable BBG --disable BBG_BLOCK_BOOT --disable BBG_BLOCK_RECOVERY
+"$CFG" --file "$OUT/.config" --set-str LSM 'landlock,lockdown,yama,loadpin,safesetid,integrity,selinux,baseband_guard,smack,tomoyo,apparmor,bpf'
+# Block Oplus security/tuning vendor modules via the kernel's own module_blacklist= parameter
+# (appended through CMDLINE_EXTEND); no kernel patch needed.
+"$CFG" --file "$OUT/.config" --set-str CMDLINE 'console=ttynull stack_depot_disable=on cgroup_disable=pressure kasan.page_alloc.sample=10 kasan.stacktrace=off kvm-arm.mode=protected bootconfig ioremap_guard module_blacklist=kernelsu,oplus_security_guard,oplus_qr_scan,oplus_score,oplus_vip_task,oplus_dns_cache,oplus_network_linkpower_module,oplus_data_module,oplus_secure_harden,oplus_security_keventupload,oplus_secure_guard_new,oplus_secure_guard,oplus_network_tuning,oplus_networks_tuning'
 make -C "$SRC" O="$OUT" ARCH=arm64 LLVM=1 LLVM_IAS=1 -j1 olddefconfig
 python3 "$ROOT/scripts/verify-config.py" "$OUT/.config" "$ROOT/configs/required.config"
 
