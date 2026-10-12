@@ -1,0 +1,8 @@
+.build/
+out/
+*.tar.gz
+*.img
+*.ko
+*.pem
+*.log
+__pycache__/

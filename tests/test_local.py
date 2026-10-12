@@ -1,0 +1,46 @@
+import json
+import pathlib
+import subprocess
+import tempfile
+import unittest
+
+ROOT = pathlib.Path(__file__).resolve().parents[1]
+
+class StagedBuildTests(unittest.TestCase):
+    def test_source_revisions_fixed(self):
+        lock=json.loads((ROOT/'sources.lock.json').read_text())
+        self.assertEqual(lock['kernel']['commit'],'c90a943feed12176302cd479087bf7aa955486e4')
+        self.assertEqual(lock['bakasu']['commit'],'f6cb7e70c10ebde149f3121ae68b945514fd0801')
+        for kind in ('kernel','clang','build_tools'):
+            self.assertEqual(len(lock[kind]['sha256']),64)
+            self.assertIn(lock[kind]['commit'],lock[kind]['url'])
+    def test_config_negative_and_positive(self):
+        required=ROOT/'configs/required.config'
+        with tempfile.TemporaryDirectory() as tmp:
+            config=pathlib.Path(tmp)/'.config'
+            config.write_text(required.read_text())
+            good=subprocess.run(['python3',str(ROOT/'scripts/verify-config.py'),str(config),str(required)])
+            self.assertEqual(good.returncode,0)
+            config.write_text('CONFIG_KSU=y\n')
+            bad=subprocess.run(['python3',str(ROOT/'scripts/verify-config.py'),str(config),str(required)],capture_output=True)
+            self.assertNotEqual(bad.returncode,0)
+    def test_config_artifact_included(self):
+        workflow=(ROOT/'.github/workflows/build.yml').read_text()
+        self.assertIn('include-hidden-files: true',workflow)
+
+    def test_no_unpinned_remote_execution(self):
+        script=(ROOT/'scripts/build.sh').read_text()
+        self.assertNotIn('curl | bash',script)
+        self.assertNotIn('git pull',script)
+        self.assertNotIn('/mnt/',script)
+        self.assertNotIn('adb ',script)
+    def test_public_files_do_not_contain_private_data(self):
+        for p in ROOT.rglob('*'):
+            if p.is_file() and '.git' not in p.parts and '__pycache__' not in p.parts and p != pathlib.Path(__file__):
+                self.assertNotIn(p.name,{'boot_b.img','init_boot_b.img','running.config','kernel.btf','hosts.yml'})
+                text=p.read_text(errors='replace')
+                for unsafe in ('192'+'.168.','/mnt'+'/workstation','/mnt'+'/projects/','GH_TOKEN=','GITHUB_TOKEN='):
+                    self.assertNotIn(unsafe,text,p.as_posix())
+
+if __name__=='__main__':
+    unittest.main()

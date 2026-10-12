@@ -1,0 +1,52 @@
+name: PadVM Kernel experimental build
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 350
+    steps:
+      - name: Checkout build manifest
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # pinned v4
+        with:
+          persist-credentials: false
+      - name: Free ephemeral runner disk
+        shell: bash
+        run: |
+          set -euo pipefail
+          for dir in /usr/share/dotnet /usr/local/lib/android /opt/ghc; do
+            if [ -d "$dir" ]; then sudo rm -rf -- "$dir"; fi
+          done
+          echo "Disk available (GiB): $(df -BG / | awk 'NR==2 {print $4}')"
+      - name: Build dependencies
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo apt-get update -qq
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -qq --no-install-recommends build-essential bc bison flex libelf-dev libssl-dev dwarves zstd curl git python3
+      - name: Preflight minimum resources
+        shell: bash
+        run: |
+          set -euo pipefail
+          disk_kb="$(df -Pk / | awk 'NR==2 {print $4}')"
+          ram_kb="$(awk '/MemTotal:/ {print $2}' /proc/meminfo)"
+          test "$disk_kb" -ge 9500000
+          test "$ram_kb" -ge 12000000
+          echo "Runner resource prerequisites OK."
+      - name: Full build (BakaSU, built-in GZVM, no SuSFS)
+        shell: bash
+        run: bash scripts/build.sh
+      - name: Publish experimental artifact
+        if: success()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # pinned v4
+        with:
+          name: PadVM-Kernel-experimental-0.1.0
+          path: .build/artifact/
+          retention-days: 30
+          include-hidden-files: true # .config is a required, generated artifact
+          if-no-files-found: error

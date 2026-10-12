@@ -1,0 +1,29 @@
+{
+  "schema": 1,
+  "kernel": {
+    "repo": "OnePlusOSS/android_kernel_oneplus_mt6897",
+    "commit": "c90a943feed12176302cd479087bf7aa955486e4",
+    "url": "https://codeload.github.com/OnePlusOSS/android_kernel_oneplus_mt6897/tar.gz/c90a943feed12176302cd479087bf7aa955486e4",
+    "sha256": "816df0b704633759a03f130f816e0a0e042485c276f0d3e23c1774f9ac4bfc48"
+  },
+  "vendor_reference": {
+    "repo": "OnePlusOSS/android_kernel_modules_and_devicetree_oneplus_mt6897",
+    "commit": "76792af3e1fefabd34be6dd684bfc9facc4d5b17"
+  },
+  "clang": {
+    "repo": "platform/prebuilts/clang/host/linux-x86",
+    "commit": "425c8149f17c8d9914bf690b4d5abe45a13fb993",
+    "url": "https://android.googlesource.com/platform/prebuilts/clang/host/linux-x86/+archive/425c8149f17c8d9914bf690b4d5abe45a13fb993/clang-r487747c.tar.gz",
+    "sha256": "33445b4ac342bacf973172645c95b0ef9eedbc03249c946aaa52cb48f568a2f2"
+  },
+  "build_tools": {
+    "repo": "kernel/prebuilts/build-tools",
+    "commit": "010d8a83d84ced4beef7779453766350db8c08cd",
+    "url": "https://android.googlesource.com/kernel/prebuilts/build-tools/+archive/010d8a83d84ced4beef7779453766350db8c08cd/linux-x86.tar.gz",
+    "sha256": "4e38a70e68814eaad0e5c7eac85d960c29310470ad52bc6363bef416b81a0f25"
+  },
+  "bakasu": {
+    "repo": "Baka-SU/BakaSU",
+    "commit": "f6cb7e70c10ebde149f3121ae68b945514fd0801"
+  }
+}
