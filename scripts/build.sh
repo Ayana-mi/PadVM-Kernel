@@ -120,7 +120,19 @@ CFG="$SRC/scripts/config"
 # (appended through CMDLINE_EXTEND); no kernel patch needed.
 "$CFG" --file "$OUT/.config" --set-str CMDLINE 'console=ttynull stack_depot_disable=on cgroup_disable=pressure kasan.page_alloc.sample=10 kasan.stacktrace=off kvm-arm.mode=protected bootconfig ioremap_guard module_blacklist=kernelsu,oplus_security_guard,oplus_qr_scan,oplus_score,oplus_vip_task,oplus_dns_cache,oplus_network_linkpower_module,oplus_data_module,oplus_secure_harden,oplus_security_keventupload,oplus_secure_guard_new,oplus_secure_guard,oplus_network_tuning,oplus_networks_tuning'
 make -C "$SRC" O="$OUT" ARCH=arm64 LLVM=1 LLVM_IAS=1 -j1 olddefconfig
-python3 "$ROOT/scripts/verify-config.py" "$OUT/.config" "$ROOT/configs/required.config"
+REQUIRED="$ROOT/configs/required.config"
+if [[ "${PADVM_GZVM_FORCE_PROBE:-0}" == 1 ]]; then
+    # Probe test kernel only. LK drops the boot.img header cmdline on this device,
+    # so the parameter must be built in (CMDLINE_EXTEND appends it to the bootloader's).
+    base="$(sed -n 's/^CONFIG_CMDLINE="\(.*\)"$/\1/p' "$OUT/.config")"
+    "$CFG" --file "$OUT/.config" --set-str CMDLINE "$base gzvm.force_probe=1"
+    "$CFG" --file "$OUT/.config" --set-str LOCALVERSION '-android14-PADVM-0.1.0-gzprobe'
+    make -C "$SRC" O="$OUT" ARCH=arm64 LLVM=1 LLVM_IAS=1 -j1 olddefconfig
+    REQUIRED="$WORK/required-gzprobe.config"
+    sed -e 's/^\(CONFIG_CMDLINE=".*\)"$/\1 gzvm.force_probe=1"/' "$ROOT/configs/required.config" > "$REQUIRED"
+    grep -q 'gzvm.force_probe=1"$' "$REQUIRED"
+fi
+python3 "$ROOT/scripts/verify-config.py" "$OUT/.config" "$REQUIRED"
 
 echo '[5/5] Full Image and modules, all runner cores'
 make -C "$SRC" O="$OUT" ARCH=arm64 LLVM=1 LLVM_IAS=1 -j"$(nproc)" Image modules
@@ -131,4 +143,5 @@ cp "$OUT/arch/arm64/boot/Image" "$OUT/.config" "$OUT/Module.symvers" "$ROOT/.bui
 cp "$LOCK" "$ROOT/.build/artifact/sources.lock.json"
 (cd "$ROOT/.build/artifact" && sha256sum Image .config Module.symvers > SHA256SUMS)
 echo 'EXPERIMENTAL - NOT FOR FLASHING' > "$ROOT/.build/artifact/NOT_FOR_FLASHING.txt"
+if [[ "${PADVM_GZVM_FORCE_PROBE:-0}" == 1 ]]; then echo 'GenieZone probe test kernel (gzvm.force_probe=1 built in)' >> "$ROOT/.build/artifact/NOT_FOR_FLASHING.txt"; fi
 echo 'Image built; Pad was not accessed.'

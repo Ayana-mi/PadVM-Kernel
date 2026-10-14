@@ -76,6 +76,10 @@ class StagedBuildTests(unittest.TestCase):
         script=(ROOT/'scripts/build.sh').read_text()
         self.assertIn('padvm-gzvm-force-probe.patch',script)
         self.assertNotIn('force_probe=1',(ROOT/'configs/required.config').read_text())
+        workflow=(ROOT/'.github/workflows/build.yml').read_text()
+        self.assertIn('gzvm_force_probe:',workflow)
+        self.assertIn('default: false',workflow)
+        self.assertIn('PADVM_GZVM_FORCE_PROBE',script)
     def test_config_artifact_included(self):
         workflow=(ROOT/'.github/workflows/build.yml').read_text()
         self.assertIn('include-hidden-files: true',workflow)
