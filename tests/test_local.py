@@ -71,6 +71,7 @@ class StagedBuildTests(unittest.TestCase):
         patch=(ROOT/'patches/padvm-gzvm-force-probe.patch').read_text()
         self.assertIn('module_param(force_probe, bool, 0444)',patch)
         self.assertIn('static bool force_probe;',patch)
+        self.assertIn('if (gzvm_forced_pdev)\n+\t\tplatform_device_unregister',patch)
         self.assertNotRegex(patch,r'\d{4}-\d{2}-\d{2} \d{2}:\d{2}')
         script=(ROOT/'scripts/build.sh').read_text()
         self.assertIn('padvm-gzvm-force-probe.patch',script)

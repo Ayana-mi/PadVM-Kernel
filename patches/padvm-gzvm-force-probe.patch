@@ -13,7 +13,7 @@ diff -ruN a/arch/arm64/geniezone/vm.c b/arch/arm64/geniezone/vm.c
 diff -ruN a/drivers/virt/geniezone/gzvm_main.c b/drivers/virt/geniezone/gzvm_main.c
 --- a/drivers/virt/geniezone/gzvm_main.c
 +++ b/drivers/virt/geniezone/gzvm_main.c
-@@ -136,7 +136,51 @@
+@@ -136,7 +136,52 @@
  	},
  };
  
@@ -59,7 +59,8 @@ diff -ruN a/drivers/virt/geniezone/gzvm_main.c b/drivers/virt/geniezone/gzvm_mai
 +
 +static void __exit gzvm_exit(void)
 +{
-+	platform_device_unregister(gzvm_forced_pdev);
++	if (gzvm_forced_pdev)
++		platform_device_unregister(gzvm_forced_pdev);
 +	platform_driver_unregister(&gzvm_driver);
 +}
 +module_exit(gzvm_exit);
