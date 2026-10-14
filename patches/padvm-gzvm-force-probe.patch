@@ -1,0 +1,68 @@
+diff -ruN a/arch/arm64/geniezone/vm.c b/arch/arm64/geniezone/vm.c
+--- a/arch/arm64/geniezone/vm.c
++++ b/arch/arm64/geniezone/vm.c
+@@ -29,6 +29,8 @@
+ 	struct arm_smccc_res res;
+ 
+ 	arm_smccc_hvc(MT_HVC_GZVM_PROBE, 0, 0, 0, 0, 0, 0, 0, &res);
++	pr_info("gzvm: probe hvc a0=%#lx a1=%#lx a2=%#lx a3=%#lx\n",
++		res.a0, res.a1, res.a2, res.a3);
+ 	if (res.a0)
+ 		return -ENXIO;
+ 
+diff -ruN a/drivers/virt/geniezone/gzvm_main.c b/drivers/virt/geniezone/gzvm_main.c
+--- a/drivers/virt/geniezone/gzvm_main.c
++++ b/drivers/virt/geniezone/gzvm_main.c
+@@ -136,7 +136,51 @@
+ 	},
+ };
+ 
+-module_platform_driver(gzvm_driver);
++/*
++ * PadVM: the OPD2407 device tree ships /hypervisor with status "disabled",
++ * so the platform bus never creates a device and the probe hypercall is never
++ * issued. With gzvm.force_probe=1 on the command line, register a DT-less
++ * platform device so the normal probe (one MT_HVC_GZVM_PROBE call) runs.
++ * Default off: without the parameter behaviour is unchanged.
++ */
++static bool force_probe;
++module_param(force_probe, bool, 0444);
++MODULE_PARM_DESC(force_probe, "Probe GenieZone even if the DT node is disabled");
++
++static struct platform_device *gzvm_forced_pdev;
++
++static int __init gzvm_init(void)
++{
++	struct device_node *np;
++	int ret;
++
++	ret = platform_driver_register(&gzvm_driver);
++	if (ret || !force_probe)
++		return ret;
++
++	np = of_find_compatible_node(NULL, NULL, "mediatek,geniezone-hyp");
++	if (np && of_device_is_available(np)) {
++		of_node_put(np);
++		return 0;
++	}
++	of_node_put(np);
++
++	pr_info("gzvm: force_probe set, registering platform device without DT node\n");
++	gzvm_forced_pdev = platform_device_register_simple(KBUILD_MODNAME, -1, NULL, 0);
++	if (IS_ERR(gzvm_forced_pdev)) {
++		pr_err("gzvm: forced platform device failed: %ld\n", PTR_ERR(gzvm_forced_pdev));
++		gzvm_forced_pdev = NULL;
++	}
++	return 0;
++}
++module_init(gzvm_init);
++
++static void __exit gzvm_exit(void)
++{
++	platform_device_unregister(gzvm_forced_pdev);
++	platform_driver_unregister(&gzvm_driver);
++}
++module_exit(gzvm_exit);
+ 
+ MODULE_DEVICE_TABLE(of, gzvm_of_match);
+ MODULE_AUTHOR("MediaTek");

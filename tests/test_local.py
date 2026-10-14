@@ -67,6 +67,14 @@ class StagedBuildTests(unittest.TestCase):
         self.assertIn('oplus_secure_guard',required)
         script=(ROOT/'scripts/build.sh').read_text()
         self.assertNotIn('setup.sh',script)
+    def test_gzvm_force_probe_patch(self):
+        patch=(ROOT/'patches/padvm-gzvm-force-probe.patch').read_text()
+        self.assertIn('module_param(force_probe, bool, 0444)',patch)
+        self.assertIn('static bool force_probe;',patch)
+        self.assertNotRegex(patch,r'\d{4}-\d{2}-\d{2} \d{2}:\d{2}')
+        script=(ROOT/'scripts/build.sh').read_text()
+        self.assertIn('padvm-gzvm-force-probe.patch',script)
+        self.assertNotIn('force_probe=1',(ROOT/'configs/required.config').read_text())
     def test_config_artifact_included(self):
         workflow=(ROOT/'.github/workflows/build.yml').read_text()
         self.assertIn('include-hidden-files: true',workflow)
