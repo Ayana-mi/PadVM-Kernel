@@ -2,11 +2,6 @@ name: PadVM Kernel experimental build
 
 on:
   workflow_dispatch:
-    inputs:
-      gzvm_force_probe:
-        description: "GenieZone probe test kernel: add gzvm.force_probe=1 to the built-in cmdline"
-        type: boolean
-        default: false
 
 permissions:
   contents: read
@@ -45,14 +40,12 @@ jobs:
           echo "Runner resource prerequisites OK."
       - name: Full build (BakaSU, built-in GZVM, no SuSFS)
         shell: bash
-        env:
-          PADVM_GZVM_FORCE_PROBE: ${{ inputs.gzvm_force_probe && '1' || '0' }}
         run: bash scripts/build.sh
       - name: Publish experimental artifact
         if: success()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # pinned v4
         with:
-          name: PadVM-Kernel-experimental-0.1.0${{ inputs.gzvm_force_probe && '-gzprobe' || '' }}
+          name: PadVM-Kernel-experimental-0.2.0
           path: .build/artifact/
           retention-days: 30
           include-hidden-files: true # .config is a required, generated artifact

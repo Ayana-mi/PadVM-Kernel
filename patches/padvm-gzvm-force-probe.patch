@@ -21,11 +21,11 @@ diff -ruN a/drivers/virt/geniezone/gzvm_main.c b/drivers/virt/geniezone/gzvm_mai
 +/*
 + * PadVM: the OPD2407 device tree ships /hypervisor with status "disabled",
 + * so the platform bus never creates a device and the probe hypercall is never
-+ * issued. With gzvm.force_probe=1 on the command line, register a DT-less
++ * issued. With gzvm.force_probe (default on), register a DT-less
 + * platform device so the normal probe (one MT_HVC_GZVM_PROBE call) runs.
-+ * Default off: without the parameter behaviour is unchanged.
++ * The firmware accepts the probe on this device; gzvm.force_probe=0 disables.
 + */
-+static bool force_probe;
++static bool force_probe = true;
 +module_param(force_probe, bool, 0444);
 +MODULE_PARM_DESC(force_probe, "Probe GenieZone even if the DT node is disabled");
 +

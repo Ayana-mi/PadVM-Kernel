@@ -107,13 +107,15 @@ grep -q 'security/baseband-guard/Kconfig' "$SRC/security/Kconfig"
 
 echo '[4/5] KABI patch and required config (no SuSFS)'
 patch -d "$SRC" -p1 --batch --forward < "$ROOT/patches/pad-sysvipc-kabi.patch"
-# GenieZone probe experiment: gzvm.force_probe=1 (cmdline) probes despite the disabled DT node; default off.
+# The OPD2407 DT keeps /hypervisor disabled; probe GenieZone anyway (gzvm.force_probe, default on).
 patch -d "$SRC" -p1 --batch --forward < "$ROOT/patches/padvm-gzvm-force-probe.patch"
 # Firmware fills exception.reserved (guest ESR); the stock check looped forever on page faults.
 patch -d "$SRC" -p1 --batch --forward < "$ROOT/patches/padvm-gzvm-exception-reserved.patch"
 CFG="$SRC/scripts/config"
-"$CFG" --file "$OUT/.config" --set-str LOCALVERSION '-android14-PADVM-0.1.0' --disable LOCALVERSION_AUTO
+"$CFG" --file "$OUT/.config" --set-str LOCALVERSION '-android14-PADVM-0.2.0' --disable LOCALVERSION_AUTO
 "$CFG" --file "$OUT/.config" --enable KSU --enable KSU_TRACEPOINT_HOOK --disable KSU_SUSFS --enable MTK_GZVM
+# VM host helpers: in-kernel virtio-net datapath and dma-buf from memfd (virtio-gpu blobs).
+"$CFG" --file "$OUT/.config" --enable VHOST_NET --enable UDMABUF
 "$CFG" --file "$OUT/.config" --enable DEBUG_INFO_BTF --enable LTO_CLANG --enable LTO_CLANG_THIN --enable CFI_CLANG
 # Baseband-guard LSM; boot/recovery partition blocking stays off (upstream default).
 "$CFG" --file "$OUT/.config" --enable BBG --disable BBG_BLOCK_BOOT --disable BBG_BLOCK_RECOVERY
@@ -122,19 +124,7 @@ CFG="$SRC/scripts/config"
 # (appended through CMDLINE_EXTEND); no kernel patch needed.
 "$CFG" --file "$OUT/.config" --set-str CMDLINE 'console=ttynull stack_depot_disable=on cgroup_disable=pressure kasan.page_alloc.sample=10 kasan.stacktrace=off kvm-arm.mode=protected bootconfig ioremap_guard module_blacklist=kernelsu,oplus_security_guard,oplus_qr_scan,oplus_score,oplus_vip_task,oplus_dns_cache,oplus_network_linkpower_module,oplus_data_module,oplus_secure_harden,oplus_security_keventupload,oplus_secure_guard_new,oplus_secure_guard,oplus_network_tuning,oplus_networks_tuning'
 make -C "$SRC" O="$OUT" ARCH=arm64 LLVM=1 LLVM_IAS=1 -j1 olddefconfig
-REQUIRED="$ROOT/configs/required.config"
-if [[ "${PADVM_GZVM_FORCE_PROBE:-0}" == 1 ]]; then
-    # Probe test kernel only. LK drops the boot.img header cmdline on this device,
-    # so the parameter must be built in (CMDLINE_EXTEND appends it to the bootloader's).
-    base="$(sed -n 's/^CONFIG_CMDLINE="\(.*\)"$/\1/p' "$OUT/.config")"
-    "$CFG" --file "$OUT/.config" --set-str CMDLINE "$base gzvm.force_probe=1"
-    "$CFG" --file "$OUT/.config" --set-str LOCALVERSION '-android14-PADVM-0.1.0-gzprobe'
-    make -C "$SRC" O="$OUT" ARCH=arm64 LLVM=1 LLVM_IAS=1 -j1 olddefconfig
-    REQUIRED="$WORK/required-gzprobe.config"
-    sed -e 's/^\(CONFIG_CMDLINE=".*\)"$/\1 gzvm.force_probe=1"/' "$ROOT/configs/required.config" > "$REQUIRED"
-    grep -q 'gzvm.force_probe=1"$' "$REQUIRED"
-fi
-python3 "$ROOT/scripts/verify-config.py" "$OUT/.config" "$REQUIRED"
+python3 "$ROOT/scripts/verify-config.py" "$OUT/.config" "$ROOT/configs/required.config"
 
 echo '[5/5] Full Image and modules, all runner cores'
 make -C "$SRC" O="$OUT" ARCH=arm64 LLVM=1 LLVM_IAS=1 -j"$(nproc)" Image modules
@@ -145,5 +135,4 @@ cp "$OUT/arch/arm64/boot/Image" "$OUT/.config" "$OUT/Module.symvers" "$ROOT/.bui
 cp "$LOCK" "$ROOT/.build/artifact/sources.lock.json"
 (cd "$ROOT/.build/artifact" && sha256sum Image .config Module.symvers > SHA256SUMS)
 echo 'EXPERIMENTAL - NOT FOR FLASHING' > "$ROOT/.build/artifact/NOT_FOR_FLASHING.txt"
-if [[ "${PADVM_GZVM_FORCE_PROBE:-0}" == 1 ]]; then echo 'GenieZone probe test kernel (gzvm.force_probe=1 built in)' >> "$ROOT/.build/artifact/NOT_FOR_FLASHING.txt"; fi
 echo 'Image built; Pad was not accessed.'
