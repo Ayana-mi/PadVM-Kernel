@@ -80,6 +80,11 @@ class StagedBuildTests(unittest.TestCase):
         self.assertIn('gzvm_force_probe:',workflow)
         self.assertIn('default: false',workflow)
         self.assertIn('PADVM_GZVM_FORCE_PROBE',script)
+    def test_gzvm_exception_reserved_patch(self):
+        patch=(ROOT/'patches/padvm-gzvm-exception-reserved.patch').read_text()
+        self.assertIn('-\t\t\treturn -EINVAL;',patch)
+        self.assertIn('reserved[6] carries the guest ESR',patch)
+        self.assertIn('padvm-gzvm-exception-reserved.patch',(ROOT/'scripts/build.sh').read_text())
     def test_config_artifact_included(self):
         workflow=(ROOT/'.github/workflows/build.yml').read_text()
         self.assertIn('include-hidden-files: true',workflow)

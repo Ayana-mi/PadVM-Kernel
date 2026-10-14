@@ -109,6 +109,8 @@ echo '[4/5] KABI patch and required config (no SuSFS)'
 patch -d "$SRC" -p1 --batch --forward < "$ROOT/patches/pad-sysvipc-kabi.patch"
 # GenieZone probe experiment: gzvm.force_probe=1 (cmdline) probes despite the disabled DT node; default off.
 patch -d "$SRC" -p1 --batch --forward < "$ROOT/patches/padvm-gzvm-force-probe.patch"
+# Firmware fills exception.reserved (guest ESR); the stock check looped forever on page faults.
+patch -d "$SRC" -p1 --batch --forward < "$ROOT/patches/padvm-gzvm-exception-reserved.patch"
 CFG="$SRC/scripts/config"
 "$CFG" --file "$OUT/.config" --set-str LOCALVERSION '-android14-PADVM-0.1.0' --disable LOCALVERSION_AUTO
 "$CFG" --file "$OUT/.config" --enable KSU --enable KSU_TRACEPOINT_HOOK --disable KSU_SUSFS --enable MTK_GZVM

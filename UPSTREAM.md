@@ -6,6 +6,7 @@
 - [Baseband-guard](https://github.com/vc-teahouse/Baseband-guard) (BBG): pinned commit, GPL-2.0; fetched at build time, integrated like its setup.sh (script not executed).
 - Vendor module blocklist: kernel's built-in `module_blacklist=` boot parameter, embedded through ARM64 `CONFIG_CMDLINE_EXTEND=y`. The 14 selected Oplus-related and KernelSU module names match the corresponding subset of the current WildKernels `CONFIG_DEBLOAT_VENDOR_MODULES` value; its other CoreSight and non-Oplus debug entries are intentionally excluded. This setting is build-time verified, not yet boot-tested.
 - `patches/padvm-gzvm-force-probe.patch`: own change to the pinned OnePlus GenieZone driver (GPL-2.0-only), adds an opt-in `gzvm.force_probe` parameter and logs the probe hypercall result.
+- `patches/padvm-gzvm-exception-reserved.patch`: own fix (GPL-2.0-only); the device GenieZone firmware reports the guest ESR in `exception.reserved`, which the pinned driver rejected, looping forever on guest page faults.
 - Android Clang and Android kernel build tools: pinned Android public source archives, copyright notices remain with upstream.
 - SYSVIPC KABI adaptation: based on [Droidspaces 6.1-compatible patch](https://github.com/ravindu644/Droidspaces-OSS/blob/b48a01de6b7d5f346f7c5028ac7959ddb3561237/Documentation/resources/kernel-patches/GKI/below-kernel-6.12/001.GKI-below-6.12-fix_sysvipc_kabi_6_7_8.patch), adjusted for the pinned OnePlus kernel. Retain Droidspaces attribution and applicable upstream terms.
 
