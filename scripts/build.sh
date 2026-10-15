@@ -107,12 +107,12 @@ grep -q 'security/baseband-guard/Kconfig' "$SRC/security/Kconfig"
 
 echo '[4/5] KABI patch and required config (no SuSFS)'
 patch -d "$SRC" -p1 --batch --forward < "$ROOT/patches/pad-sysvipc-kabi.patch"
-# The OPD2407 DT keeps /hypervisor disabled; probe GenieZone anyway (gzvm.force_probe, default on).
-patch -d "$SRC" -p1 --batch --forward < "$ROOT/patches/padvm-gzvm-force-probe.patch"
-# Firmware fills exception.reserved (guest ESR); the stock check looped forever on page faults.
-patch -d "$SRC" -p1 --batch --forward < "$ROOT/patches/padvm-gzvm-exception-reserved.patch"
+# GenieZone driver backported from ACK android15-6.6 (60020d08): the device firmware speaks
+# the newer protocol (IPI/idle exits, demand paging). Adds gzvm.force_probe (default on) for
+# the disabled OPD2407 DT node and accepts firmware data in exception.reserved.
+patch -d "$SRC" -p1 --batch --forward < "$ROOT/patches/padvm-gzvm-backport-6.6.patch"
 CFG="$SRC/scripts/config"
-"$CFG" --file "$OUT/.config" --set-str LOCALVERSION '-android14-PADVM-0.2.0' --disable LOCALVERSION_AUTO
+"$CFG" --file "$OUT/.config" --set-str LOCALVERSION '-android14-PADVM-0.3.0' --disable LOCALVERSION_AUTO
 "$CFG" --file "$OUT/.config" --enable KSU --enable KSU_TRACEPOINT_HOOK --disable KSU_SUSFS --enable MTK_GZVM
 # VM host helpers: in-kernel virtio-net datapath and dma-buf from memfd (virtio-gpu blobs).
 "$CFG" --file "$OUT/.config" --enable VHOST_NET --enable UDMABUF

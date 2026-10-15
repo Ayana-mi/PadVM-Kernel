@@ -1,0 +1,3082 @@
+diff -ruN a/arch/arm64/geniezone/Makefile b/arch/arm64/geniezone/Makefile
+--- a/arch/arm64/geniezone/Makefile
++++ b/arch/arm64/geniezone/Makefile
+@@ -4,6 +4,6 @@
+ #
+ include $(srctree)/drivers/virt/geniezone/Makefile
+ 
+-gzvm-y += vm.o vcpu.o vgic.o
++gzvm-y += vm.o vcpu.o vgic.o hvc.o
+ 
+ obj-$(CONFIG_MTK_GZVM) += gzvm.o
+diff -ruN a/arch/arm64/geniezone/gzvm_arch_common.h b/arch/arm64/geniezone/gzvm_arch_common.h
+--- a/arch/arm64/geniezone/gzvm_arch_common.h
++++ b/arch/arm64/geniezone/gzvm_arch_common.h
+@@ -7,6 +7,7 @@
+ #define __GZVM_ARCH_COMMON_H__
+ 
+ #include <linux/arm-smccc.h>
++#include <linux/clocksource.h>
+ 
+ enum {
+ 	GZVM_FUNC_CREATE_VM = 0,
+@@ -26,13 +27,14 @@
+ 	GZVM_FUNC_SET_DTB_CONFIG = 16,
+ 	GZVM_FUNC_MAP_GUEST = 17,
+ 	GZVM_FUNC_MAP_GUEST_BLOCK = 18,
++	GZVM_FUNC_GET_STATISTICS = 19,
+ 	NR_GZVM_FUNC,
+ };
+ 
+ #define SMC_ENTITY_MTK			59
+ #define GZVM_FUNCID_START		(0x1000)
+ #define GZVM_HCALL_ID(func)						\
+-	ARM_SMCCC_CALL_VAL(ARM_SMCCC_FAST_CALL, ARM_SMCCC_SMC_32,	\
++	ARM_SMCCC_CALL_VAL(ARM_SMCCC_FAST_CALL, ARM_SMCCC_SMC_64,	\
+ 			   SMC_ENTITY_MTK, (GZVM_FUNCID_START + (func)))
+ 
+ #define MT_HVC_GZVM_CREATE_VM		GZVM_HCALL_ID(GZVM_FUNC_CREATE_VM)
+@@ -52,35 +54,29 @@
+ #define MT_HVC_GZVM_SET_DTB_CONFIG	GZVM_HCALL_ID(GZVM_FUNC_SET_DTB_CONFIG)
+ #define MT_HVC_GZVM_MAP_GUEST		GZVM_HCALL_ID(GZVM_FUNC_MAP_GUEST)
+ #define MT_HVC_GZVM_MAP_GUEST_BLOCK	GZVM_HCALL_ID(GZVM_FUNC_MAP_GUEST_BLOCK)
++#define MT_HVC_GZVM_GET_STATISTICS	GZVM_HCALL_ID(GZVM_FUNC_GET_STATISTICS)
+ 
+ #define GIC_V3_NR_LRS			16
+ 
+ /**
+  * gzvm_hypcall_wrapper() - the wrapper for hvc calls
+- * @a0-a7: arguments passed in registers 0 to 7
++ * @a0: argument passed in registers 0
++ * @a1: argument passed in registers 1
++ * @a2: argument passed in registers 2
++ * @a3: argument passed in registers 3
++ * @a4: argument passed in registers 4
++ * @a5: argument passed in registers 5
++ * @a6: argument passed in registers 6
++ * @a7: argument passed in registers 7
+  * @res: result values from registers 0 to 3
+  *
+  * Return: The wrapper helps caller to convert geniezone errno to Linux errno.
+  */
+-static inline int gzvm_hypcall_wrapper(unsigned long a0, unsigned long a1,
+-				       unsigned long a2, unsigned long a3,
+-				       unsigned long a4, unsigned long a5,
+-				       unsigned long a6, unsigned long a7,
+-				       struct arm_smccc_res *res)
+-{
+-	arm_smccc_hvc(a0, a1, a2, a3, a4, a5, a6, a7, res);
+-	return gzvm_err_to_errno(res->a0);
+-}
+-
+-static inline u16 get_vmid_from_tuple(unsigned int tuple)
+-{
+-	return (u16)(tuple >> 16);
+-}
+-
+-static inline u16 get_vcpuid_from_tuple(unsigned int tuple)
+-{
+-	return (u16)(tuple & 0xffff);
+-}
++int gzvm_hypcall_wrapper(unsigned long a0, unsigned long a1,
++			 unsigned long a2, unsigned long a3,
++			 unsigned long a4, unsigned long a5,
++			 unsigned long a6, unsigned long a7,
++			 struct arm_smccc_res *res);
+ 
+ /**
+  * struct gzvm_vcpu_hwstate: Sync architecture state back to host for handling
+@@ -88,6 +84,12 @@
+  * @__pad: add an explicit '__u32 __pad;' in the middle to make it clear
+  *         what the actual layout is.
+  * @lr: The array of LRs(list registers).
++ * @vtimer_offset: The offset maintained by hypervisor that is host cycle count
++ *                 when guest VM startup.
++ * @vtimer_delay: The remaining time before the next timer tick is triggered
++ *                while the VM is running.
++ * @vtimer_migrate: Indicates whether the guest virtual timer needs to be
++ *                  migrated to the host software timer.
+  *
+  * - Keep the same layout of hypervisor data struct.
+  * - Sync list registers back for acking virtual device interrupt status.
+@@ -96,19 +98,23 @@
+ 	__le32 nr_lrs;
+ 	__le32 __pad;
+ 	__le64 lr[GIC_V3_NR_LRS];
++	__le64 vtimer_offset;
++	__le64 vtimer_delay;
++	__le32 vtimer_migrate;
++};
++
++struct timecycle {
++	u32 mult;
++	u32 shift;
+ };
+ 
++u32 gzvm_vtimer_get_clock_mult(void);
++u32 gzvm_vtimer_get_clock_shift(void);
++
+ static inline unsigned int
+ assemble_vm_vcpu_tuple(u16 vmid, u16 vcpuid)
+ {
+ 	return ((unsigned int)vmid << 16 | vcpuid);
+ }
+ 
+-static inline void
+-disassemble_vm_vcpu_tuple(unsigned int tuple, u16 *vmid, u16 *vcpuid)
+-{
+-	*vmid = get_vmid_from_tuple(tuple);
+-	*vcpuid = get_vcpuid_from_tuple(tuple);
+-}
+-
+ #endif /* __GZVM_ARCH_COMMON_H__ */
+diff -ruN a/arch/arm64/geniezone/hvc.c b/arch/arm64/geniezone/hvc.c
+--- a/arch/arm64/geniezone/hvc.c
++++ b/arch/arm64/geniezone/hvc.c
+@@ -0,0 +1,73 @@
++// SPDX-License-Identifier: GPL-2.0
++/*
++ * Copyright (c) 2023 MediaTek Inc.
++ */
++#include <linux/clocksource.h>
++#include <linux/kernel.h>
++#include <linux/timekeeping.h>
++#include <linux/soc/mediatek/gzvm_drv.h>
++#include "gzvm_arch_common.h"
++
++#define GZVM_PTP_VIRT_COUNTER 0
++#define GZVM_PTP_PHYS_COUNTER 1
++/**
++ * gzvm_handle_ptp_time() - Sync time between host and guest VM
++ * @vcpu: Pointer to struct gzvm_vcpu_run in userspace
++ * @counter: Counter type from guest VM
++ * Return: Always return 0 because there are no cases of failure
++ *
++ * The following register values will be passed to the guest VM
++ * for time synchronization:
++ * regs->x0 (upper 32 bits) wall clock time
++ * regs->x1 (lower 32 bits) wall clock time
++ * regs->x2 (upper 32 bits) cycles
++ * regs->x3 (lower 32 bits) cycles
++ */
++static int gzvm_handle_ptp_time(struct gzvm_vcpu *vcpu, int counter)
++{
++	struct system_time_snapshot snapshot;
++	u64 cycles = 0;
++
++	ktime_get_snapshot(&snapshot);
++
++	switch (counter) {
++	case GZVM_PTP_VIRT_COUNTER:
++		cycles = snapshot.cycles -
++			 le64_to_cpu(vcpu->hwstate->vtimer_offset);
++		break;
++	case GZVM_PTP_PHYS_COUNTER:
++		cycles = snapshot.cycles;
++		break;
++	default:
++		break;
++	}
++
++	vcpu->run->hypercall.args[0] = upper_32_bits(snapshot.real);
++	vcpu->run->hypercall.args[1] = lower_32_bits(snapshot.real);
++	vcpu->run->hypercall.args[2] = upper_32_bits(cycles);
++	vcpu->run->hypercall.args[3] = lower_32_bits(cycles);
++
++	return 0;
++}
++
++/**
++ * gzvm_arch_handle_guest_hvc() - Handle architecture-related guest hvc
++ * @vcpu: Pointer to struct gzvm_vcpu_run in userspace
++ * Return:
++ * * true - This hvc has been processed, no need to back to VMM.
++ * * false - This hvc has not been processed, require userspace.
++ */
++bool gzvm_arch_handle_guest_hvc(struct gzvm_vcpu *vcpu)
++{
++	int ret, counter;
++
++	switch (vcpu->run->hypercall.args[0]) {
++	case GZVM_HVC_PTP:
++		counter = vcpu->run->hypercall.args[1];
++		ret = gzvm_handle_ptp_time(vcpu, counter);
++		return (ret == 0) ? true : false;
++	default:
++		break;
++	}
++	return false;
++}
+diff -ruN a/arch/arm64/geniezone/vcpu.c b/arch/arm64/geniezone/vcpu.c
+--- a/arch/arm64/geniezone/vcpu.c
++++ b/arch/arm64/geniezone/vcpu.c
+@@ -8,9 +8,25 @@
+ #include <linux/uaccess.h>
+ 
+ #include <linux/gzvm.h>
+-#include <linux/gzvm_drv.h>
++#include <linux/soc/mediatek/gzvm_drv.h>
+ #include "gzvm_arch_common.h"
+ 
++u64 gzvm_vcpu_arch_get_timer_delay_ns(struct gzvm_vcpu *vcpu)
++{
++	u64 ns;
++
++	if (vcpu->hwstate->vtimer_migrate) {
++		ns = clocksource_cyc2ns(le64_to_cpu(vcpu->hwstate->vtimer_delay),
++					gzvm_vtimer_get_clock_mult(),
++					gzvm_vtimer_get_clock_shift());
++	} else {
++		ns = 0;
++	}
++
++	/* 0: no migrate, otherwise: migrate  */
++	return ns;
++}
++
+ int gzvm_arch_vcpu_update_one_reg(struct gzvm_vcpu *vcpu, __u64 reg_id,
+ 				  bool is_write, __u64 *data)
+ {
+diff -ruN a/arch/arm64/geniezone/vgic.c b/arch/arm64/geniezone/vgic.c
+--- a/arch/arm64/geniezone/vgic.c
++++ b/arch/arm64/geniezone/vgic.c
+@@ -5,7 +5,7 @@
+ 
+ #include <linux/irqchip/arm-gic-v3.h>
+ #include <linux/gzvm.h>
+-#include <linux/gzvm_drv.h>
++#include <linux/soc/mediatek/gzvm_drv.h>
+ #include "gzvm_arch_common.h"
+ 
+ int gzvm_arch_create_device(u16 vm_id, struct gzvm_create_device *gzvm_dev)
+diff -ruN a/arch/arm64/geniezone/vm.c b/arch/arm64/geniezone/vm.c
+--- a/arch/arm64/geniezone/vm.c
++++ b/arch/arm64/geniezone/vm.c
+@@ -7,31 +7,110 @@
+ #include <linux/err.h>
+ #include <linux/uaccess.h>
+ 
++#define CREATE_TRACE_POINTS
++#include <trace/events/geniezone.h>
+ #include <linux/gzvm.h>
+-#include <linux/gzvm_drv.h>
++#include <linux/soc/mediatek/gzvm_drv.h>
+ #include "gzvm_arch_common.h"
+ 
+-#define PAR_PA47_MASK ((((1UL << 48) - 1) >> 12) << 12)
++#define PAR_PA47_MASK GENMASK_ULL(47, 12)
++
++static struct timecycle clock_scale_factor;
++
++u32 gzvm_vtimer_get_clock_mult(void)
++{
++	return clock_scale_factor.mult;
++}
++
++u32 gzvm_vtimer_get_clock_shift(void)
++{
++	return clock_scale_factor.shift;
++}
++
++/**
++ * gzvm_hypcall_wrapper() - the wrapper for hvc calls
++ * @a0: arguments passed in registers 0
++ * @a1: arguments passed in registers 1
++ * @a2: arguments passed in registers 2
++ * @a3: arguments passed in registers 3
++ * @a4: arguments passed in registers 4
++ * @a5: arguments passed in registers 5
++ * @a6: arguments passed in registers 6
++ * @a7: arguments passed in registers 7
++ * @res: result values from registers 0 to 3
++ *
++ * Return: The wrapper helps caller to convert geniezone errno to Linux errno.
++ */
++int gzvm_hypcall_wrapper(unsigned long a0, unsigned long a1,
++			 unsigned long a2, unsigned long a3,
++			 unsigned long a4, unsigned long a5,
++			 unsigned long a6, unsigned long a7,
++			 struct arm_smccc_res *res)
++{
++	struct arm_smccc_1_2_regs res_1_2;
++	struct arm_smccc_1_2_regs args = {
++		.a0 = a0,
++		.a1 = a1,
++		.a2 = a2,
++		.a3 = a3,
++		.a4 = a4,
++		.a5 = a5,
++		.a6 = a6,
++		.a7 = a7,
++	};
++	trace_mtk_hypcall_enter(a0);
++	arm_smccc_1_2_hvc(&args, &res_1_2);
++	res->a0 = res_1_2.a0;
++	res->a1 = res_1_2.a1;
++	res->a2 = res_1_2.a2;
++	res->a3 = res_1_2.a3;
++	trace_mtk_hypcall_leave(a0, (res->a0 != ERR_NOT_SUPPORTED) ? 0 : 1);
++
++	return gzvm_err_to_errno(res->a0);
++}
+ 
+ int gzvm_arch_inform_exit(u16 vm_id)
+ {
+ 	struct arm_smccc_res res;
++	int ret;
+ 
+-	arm_smccc_hvc(MT_HVC_GZVM_INFORM_EXIT, vm_id, 0, 0, 0, 0, 0, 0, &res);
+-	if (res.a0 == 0)
+-		return 0;
++	ret = gzvm_hypcall_wrapper(MT_HVC_GZVM_INFORM_EXIT, vm_id, 0, 0, 0, 0, 0, 0, &res);
++	if (ret)
++		return -ENXIO;
+ 
+-	return -ENXIO;
++	return 0;
+ }
+ 
+-int gzvm_arch_probe(void)
++int gzvm_arch_probe(struct gzvm_version drv_version,
++		    struct gzvm_version *hyp_version)
+ {
+ 	struct arm_smccc_res res;
++	int ret;
+ 
+-	arm_smccc_hvc(MT_HVC_GZVM_PROBE, 0, 0, 0, 0, 0, 0, 0, &res);
+-	if (res.a0)
++	ret = gzvm_hypcall_wrapper(MT_HVC_GZVM_PROBE,
++				   drv_version.major,
++				   drv_version.minor,
++				   drv_version.sub,
++				   0, 0, 0, 0, &res);
++	if (ret)
+ 		return -ENXIO;
+ 
++	hyp_version->major = (u32)res.a1;
++	hyp_version->minor = (u32)res.a2;
++	hyp_version->sub = res.a3;
++
++	return 0;
++}
++
++int gzvm_arch_drv_init(void)
++{
++	/* timecycle init mult shift */
++	clocks_calc_mult_shift(&clock_scale_factor.mult,
++			       &clock_scale_factor.shift,
++			       arch_timer_get_cntfrq(),
++			       NSEC_PER_SEC,
++			       30);
++
+ 	return 0;
+ }
+ 
+@@ -96,12 +175,18 @@
+ 	return ret ? ret : res.a1;
+ }
+ 
+-int gzvm_arch_destroy_vm(u16 vm_id)
++int gzvm_arch_destroy_vm(u16 vm_id, u64 destroy_page_gran)
+ {
+ 	struct arm_smccc_res res;
++	int ret;
++
++	do {
++		ret = gzvm_hypcall_wrapper(MT_HVC_GZVM_DESTROY_VM, vm_id,
++					   destroy_page_gran, 0, 0,
++					   0, 0, 0, &res);
++	} while (ret == -EAGAIN);
+ 
+-	return gzvm_hypcall_wrapper(MT_HVC_GZVM_DESTROY_VM, vm_id, 0, 0, 0, 0,
+-				    0, 0, &res);
++	return ret;
+ }
+ 
+ int gzvm_arch_memregion_purpose(struct gzvm *gzvm,
+@@ -133,6 +218,50 @@
+ 				    res);
+ }
+ 
++static int gzvm_arch_enable_cap(struct gzvm_enable_cap *cap,
++				struct arm_smccc_res *res)
++{
++	return gzvm_hypcall_wrapper(MT_HVC_GZVM_ENABLE_CAP, 0,
++				    cap->cap, cap->args[0], cap->args[1],
++				    cap->args[2], cap->args[3], cap->args[4],
++				    res);
++}
++
++int gzvm_arch_query_hyp_batch_pages(struct gzvm_enable_cap *cap,
++				    void __user *argp)
++{
++	struct arm_smccc_res res = {0};
++	int ret;
++
++	ret = gzvm_arch_enable_cap(cap, &res);
++
++	if (ret)
++		return ret;
++
++	if (res.a1 == 0 ||
++	    GZVM_BLOCK_BASED_DEMAND_PAGE_SIZE % (PAGE_SIZE * res.a1) != 0)
++		return -EFAULT;
++
++	cap->args[0] = res.a1;
++
++	return ret;
++}
++
++int gzvm_arch_query_destroy_batch_pages(struct gzvm_enable_cap *cap,
++					void __user *argp)
++{
++	struct arm_smccc_res res = {0};
++	int ret;
++
++	ret = gzvm_arch_enable_cap(cap, &res);
++	/* destroy page batch size should be power of 2 */
++	if (ret || ((res.a1 & (res.a1 - 1)) != 0))
++		return -EINVAL;
++
++	cap->args[0] = res.a1;
++	return ret;
++}
++
+ /**
+  * gzvm_vm_ioctl_get_pvmfw_size() - Get pvmfw size from hypervisor, return
+  *				    in x1, and return to userspace in args
+@@ -169,31 +298,25 @@
+  * @gfn: Guest frame number.
+  * @total_pages: Total page numbers.
+  * @slot: Pointer to struct gzvm_memslot.
++ * @gzvm: Pointer to struct gzvm.
+  *
+  * Return: how many pages we've fill in, negative if error
+  */
+ static int fill_constituents(struct mem_region_addr_range *consti,
+ 			     int *consti_cnt, int max_nr_consti, u64 gfn,
+-			     u32 total_pages, struct gzvm_memslot *slot)
++			     u32 total_pages, struct gzvm_memslot *slot,
++			     struct gzvm *gzvm)
+ {
+-	u64 pfn, prev_pfn, gfn_end;
+-	int nr_pages = 1;
+-	int i = 0;
++	u64 pfn = 0, prev_pfn = 0, gfn_end = 0;
++	int nr_pages = 0;
++	int i = -1;
+ 
+ 	if (unlikely(total_pages == 0))
+ 		return -EINVAL;
+ 	gfn_end = gfn + total_pages;
+ 
+-	/* entry 0 */
+-	if (gzvm_gfn_to_pfn_memslot(slot, gfn, &pfn) != 0)
+-		return -EFAULT;
+-	consti[0].address = PFN_PHYS(pfn);
+-	consti[0].pg_cnt = 1;
+-	gfn++;
+-	prev_pfn = pfn;
+-
+ 	while (i < max_nr_consti && gfn < gfn_end) {
+-		if (gzvm_gfn_to_pfn_memslot(slot, gfn, &pfn) != 0)
++		if (gzvm_vm_allocate_guest_page(gzvm, slot, gfn, &pfn) != 0)
+ 			return -EFAULT;
+ 		if (pfn == (prev_pfn + 1)) {
+ 			consti[i].pg_cnt++;
+@@ -216,64 +339,81 @@
+ }
+ 
+ /**
+- * populate_mem_region() - Iterate all mem slot and populate pa to buffer until it's full
++ * gzvm_vm_populate_mem_region() - Iterate all mem slot and populate pa to
++ * buffer until it's full
+  * @gzvm: Pointer to struct gzvm.
++ * @slot_id: Memory slot id to be populated.
+  *
+  * Return: 0 if it is successful, negative if error
+  */
+-static int populate_mem_region(struct gzvm *gzvm)
++int gzvm_vm_populate_mem_region(struct gzvm *gzvm, int slot_id)
+ {
+-	int slot_cnt = 0;
++	struct gzvm_memslot *memslot = &gzvm->memslot[slot_id];
++	struct gzvm_memory_region_ranges *region;
++	int max_nr_consti, remain_pages;
++	u64 gfn, gfn_end;
++	u32 buf_size;
++	int ret = 0;
++
++	buf_size = PAGE_SIZE * 2;
++	region = alloc_pages_exact(buf_size, GFP_KERNEL);
++	if (!region)
++		return -ENOMEM;
++
++	max_nr_consti = (buf_size - sizeof(*region)) /
++			sizeof(struct mem_region_addr_range);
++
++	region->slot = memslot->slot_id;
++	remain_pages = memslot->npages;
++	gfn = memslot->base_gfn;
++	gfn_end = gfn + remain_pages;
++
++	mutex_lock(&gzvm->mem_lock);
++	while (gfn < gfn_end) {
++		int nr_pages;
++
++		nr_pages = fill_constituents(region->constituents,
++					     &region->constituent_cnt,
++					     max_nr_consti, gfn,
++					     remain_pages, memslot, gzvm);
++
++		if (nr_pages < 0) {
++			pr_err("Failed to fill constituents\n");
++			ret = -EFAULT;
++			goto err_unlock;
++		}
+ 
+-	while (slot_cnt < GZVM_MAX_MEM_REGION && gzvm->memslot[slot_cnt].npages != 0) {
+-		struct gzvm_memslot *memslot = &gzvm->memslot[slot_cnt];
+-		struct gzvm_memory_region_ranges *region;
+-		int max_nr_consti, remain_pages;
+-		u64 gfn, gfn_end;
+-		u32 buf_size;
+-
+-		buf_size = PAGE_SIZE * 2;
+-		region = alloc_pages_exact(buf_size, GFP_KERNEL);
+-		if (!region)
+-			return -ENOMEM;
+-
+-		max_nr_consti = (buf_size - sizeof(*region)) /
+-				sizeof(struct mem_region_addr_range);
+-
+-		region->slot = memslot->slot_id;
+-		remain_pages = memslot->npages;
+-		gfn = memslot->base_gfn;
+-		gfn_end = gfn + remain_pages;
+-
+-		while (gfn < gfn_end) {
+-			int nr_pages;
+-
+-			nr_pages = fill_constituents(region->constituents,
+-						     &region->constituent_cnt,
+-						     max_nr_consti, gfn,
+-						     remain_pages, memslot);
+-
+-			if (nr_pages < 0) {
+-				pr_err("Failed to fill constituents\n");
+-				free_pages_exact(region, buf_size);
+-				return -EFAULT;
+-			}
+-
+-			region->gpa = PFN_PHYS(gfn);
+-			region->total_pages = nr_pages;
+-			remain_pages -= nr_pages;
+-			gfn += nr_pages;
+-
+-			if (gzvm_arch_set_memregion(gzvm->vm_id, buf_size,
+-						    virt_to_phys(region))) {
+-				pr_err("Failed to register memregion to hypervisor\n");
+-				free_pages_exact(region, buf_size);
+-				return -EFAULT;
+-			}
++		region->gpa = PFN_PHYS(gfn);
++		region->total_pages = nr_pages;
++		remain_pages -= nr_pages;
++		gfn += nr_pages;
++
++		if (gzvm_arch_set_memregion(gzvm->vm_id, buf_size,
++					    virt_to_phys(region))) {
++			pr_err("Failed to register memregion to hypervisor\n");
++			ret = -EFAULT;
++			goto err_unlock;
+ 		}
+-		free_pages_exact(region, buf_size);
+-		++slot_cnt;
+ 	}
++err_unlock:
++	mutex_unlock(&gzvm->mem_lock);
++	free_pages_exact(region, buf_size);
++	return ret;
++}
++
++static int populate_all_mem_regions(struct gzvm *gzvm)
++{
++	int ret, i;
++
++	for (i = 0; i < GZVM_MAX_MEM_REGION; i++) {
++		if (gzvm->memslot[i].npages == 0)
++			continue;
++
++		ret = gzvm_vm_populate_mem_region(gzvm, i);
++		if (ret != 0)
++			return ret;
++	}
++
+ 	return 0;
+ }
+ 
+@@ -303,7 +443,7 @@
+ 		 * populate memory in advance to improve performance for protected VM.
+ 		 */
+ 		if (gzvm->demand_page_gran == PAGE_SIZE)
+-			populate_mem_region(gzvm);
++			populate_all_mem_regions(gzvm);
+ 		ret = gzvm_vm_arch_enable_cap(gzvm, cap, &res);
+ 		return ret;
+ 	case GZVM_CAP_PVM_GET_PVMFW_SIZE:
+@@ -316,20 +456,21 @@
+ 	return -EINVAL;
+ }
+ 
+-int gzvm_vm_ioctl_arch_enable_cap(struct gzvm *gzvm,
+-				  struct gzvm_enable_cap *cap,
+-				  void __user *argp)
++int gzvm_vm_internal_arch_enable_cap(struct gzvm *gzvm,
++				     struct gzvm_enable_cap *cap)
+ {
+ 	struct arm_smccc_res res = {0};
+ 	int ret;
+ 
+ 	switch (cap->cap) {
+-	case GZVM_CAP_PROTECTED_VM:
+-		ret = gzvm_vm_ioctl_cap_pvm(gzvm, cap, argp);
+-		return ret;
++	case GZVM_CAP_ENABLE_DEMAND_PAGING:
++		fallthrough;
+ 	case GZVM_CAP_BLOCK_BASED_DEMAND_PAGING:
+ 		ret = gzvm_vm_arch_enable_cap(gzvm, cap, &res);
+ 		return ret;
++	case GZVM_CAP_ENABLE_IDLE:
++		ret = gzvm_vm_arch_enable_cap(gzvm, cap, &res);
++		return ret;
+ 	default:
+ 		break;
+ 	}
+@@ -337,29 +478,19 @@
+ 	return -EINVAL;
+ }
+ 
+-/**
+- * gzvm_hva_to_pa_arch() - converts hva to pa with arch-specific way
+- * @hva: Host virtual address.
+- *
+- * Return: GZVM_PA_ERR_BAD for translation error
+- */
+-u64 gzvm_hva_to_pa_arch(u64 hva)
++int gzvm_vm_ioctl_arch_enable_cap(struct gzvm *gzvm,
++				  struct gzvm_enable_cap *cap,
++				  void __user *argp)
+ {
+-	unsigned long flags;
+-	u64 par;
++	int ret;
+ 
+-	local_irq_save(flags);
+-	asm volatile("at s1e1r, %0" :: "r" (hva));
+-	isb();
+-	par = read_sysreg_par();
+-	local_irq_restore(flags);
+-
+-	if (par & SYS_PAR_EL1_F)
+-		return GZVM_PA_ERR_BAD;
+-	par = par & PAR_PA47_MASK;
+-	if (!par)
+-		return GZVM_PA_ERR_BAD;
+-	return par;
++	switch (cap->cap) {
++	case GZVM_CAP_PROTECTED_VM:
++		ret = gzvm_vm_ioctl_cap_pvm(gzvm, cap, argp);
++		return ret;
++	default:
++		return -EINVAL;
++	}
+ }
+ 
+ int gzvm_arch_map_guest(u16 vm_id, int memslot_id, u64 pfn, u64 gfn,
+@@ -378,3 +509,16 @@
+ 	return gzvm_hypcall_wrapper(MT_HVC_GZVM_MAP_GUEST_BLOCK, vm_id,
+ 				    memslot_id, gfn, nr_pages, 0, 0, 0, &res);
+ }
++
++int gzvm_arch_get_statistics(struct gzvm *gzvm)
++{
++	struct arm_smccc_res res;
++	int ret;
++
++	ret = gzvm_hypcall_wrapper(MT_HVC_GZVM_GET_STATISTICS, gzvm->vm_id,
++				   0, 0, 0, 0, 0, 0, &res);
++
++	gzvm->stat.protected_hyp_mem = ((ret == 0) ? res.a1 : 0);
++	gzvm->stat.protected_shared_mem = ((ret == 0) ? res.a2 : 0);
++	return ret;
++}
+diff -ruN a/drivers/virt/geniezone/Kconfig b/drivers/virt/geniezone/Kconfig
+--- a/drivers/virt/geniezone/Kconfig
++++ b/drivers/virt/geniezone/Kconfig
+@@ -2,7 +2,7 @@
+ 
+ config MTK_GZVM
+ 	tristate "GenieZone Hypervisor driver for guest VM operation"
+-	depends on ARM64
++	depends on ARM64 && EVENTFD
+ 	help
+ 	  This driver, gzvm, enables to run guest VMs on MTK GenieZone
+ 	  hypervisor. It exports kvm-like interfaces for VMM (e.g., crosvm) in
+diff -ruN a/drivers/virt/geniezone/gzvm_exception.c b/drivers/virt/geniezone/gzvm_exception.c
+--- a/drivers/virt/geniezone/gzvm_exception.c
++++ b/drivers/virt/geniezone/gzvm_exception.c
+@@ -4,7 +4,9 @@
+  */
+ 
+ #include <linux/device.h>
+-#include <linux/gzvm_drv.h>
++#include <linux/soc/mediatek/gzvm_drv.h>
++#include <linux/sched.h>
++#include <linux/rcuwait.h>
+ 
+ /**
+  * gzvm_handle_guest_exception() - Handle guest exception
+@@ -17,10 +19,12 @@
+ {
+ 	int ret;
+ 
+-	for (int i = 0; i < ARRAY_SIZE(vcpu->run->exception.reserved); i++) {
+-		if (vcpu->run->exception.reserved[i])
+-			return -EINVAL;
+-	}
++	/*
++	 * PadVM: the OPD2407 GenieZone firmware fills exception.reserved
++	 * (reserved[6] carries the guest ESR, e.g. 0x82000005 for an
++	 * instruction abort). Rejecting that bounced every guest page fault
++	 * to userspace; ignore the reserved words and handle the fault.
++	 */
+ 
+ 	switch (vcpu->run->exception.exception) {
+ 	case GZVM_EXCEPTION_PAGE_FAULT:
+@@ -56,7 +60,55 @@
+ 		ret = gzvm_handle_relinquish(vcpu, ipa);
+ 		return (ret == 0) ? true : false;
+ 	default:
+-		break;
++		return gzvm_arch_handle_guest_hvc(vcpu);
++	}
++}
++
++static void vcpu_block_wait(struct gzvm_vcpu *vcpu)
++{
++	struct rcuwait *wait = &vcpu->wait;
++
++	prepare_to_rcuwait(wait);
++
++	while (true) {
++		set_current_state(TASK_INTERRUPTIBLE);
++		if (vcpu->idle_events.virtio_irq) {
++			vcpu->idle_events.virtio_irq = 0;
++			break;
++		}
++		if (vcpu->idle_events.vtimer_irq) {
++			vcpu->idle_events.vtimer_irq = 0;
++			break;
++		}
++		if (signal_pending(current))
++			break;
++		schedule();
++	}
++	finish_rcuwait(wait);
++}
++
++/**
++ * gzvm_handle_guest_idle() - Handle guest vm entering idle
++ * @vcpu: Pointer to struct gzvm_vcpu struct
++ * Return:
++ */
++int gzvm_handle_guest_idle(struct gzvm_vcpu *vcpu)
++{
++	int ret = 0;
++	u64 ns = 0;
++
++	ns = gzvm_vcpu_arch_get_timer_delay_ns(vcpu);
++
++	if (ns) {
++		gzvm_vtimer_set(vcpu, ns);
++		vcpu_block_wait(vcpu);
++		gzvm_vtimer_release(vcpu);
+ 	}
+-	return false;
++
++	return ret;
++}
++
++void gzvm_handle_guest_ipi(struct gzvm_vcpu *vcpu)
++{
++	gzvm_vcpu_wakeup_all(vcpu->gzvm);
+ }
+diff -ruN a/drivers/virt/geniezone/gzvm_ioeventfd.c b/drivers/virt/geniezone/gzvm_ioeventfd.c
+--- a/drivers/virt/geniezone/gzvm_ioeventfd.c
++++ b/drivers/virt/geniezone/gzvm_ioeventfd.c
+@@ -7,7 +7,7 @@
+ #include <linux/file.h>
+ #include <linux/syscalls.h>
+ #include <linux/gzvm.h>
+-#include <linux/gzvm_drv.h>
++#include <linux/soc/mediatek/gzvm_drv.h>
+ #include <linux/wait.h>
+ #include <linux/poll.h>
+ #include <linux/module.h>
+@@ -23,13 +23,13 @@
+ };
+ 
+ /**
+- * ioeventfd_check_collision() - Check collison assumes gzvm->slots_lock held.
++ * ioeventfd_check_collision() - Check collision assumes gzvm->ioevent_lock held.
+  * @gzvm: Pointer to gzvm.
+  * @p: Pointer to gzvm_ioevent.
+  *
+  * Return:
+- * * true			- collison found
+- * * false			- no collison
++ * * true			- collision found
++ * * false			- no collision
+  */
+ static bool ioeventfd_check_collision(struct gzvm *gzvm, struct gzvm_ioevent *p)
+ {
+@@ -115,8 +115,7 @@
+ 
+ 	wildcard = !(args->flags & GZVM_IOEVENTFD_FLAG_DATAMATCH);
+ 
+-	mutex_lock(&gzvm->lock);
+-
++	mutex_lock(&gzvm->ioevent_lock);
+ 	list_for_each_entry_safe(p, tmp, &gzvm->ioevents, list) {
+ 		if (p->evt_ctx != evt_ctx  ||
+ 		    p->addr != args->addr  ||
+@@ -132,7 +131,7 @@
+ 		break;
+ 	}
+ 
+-	mutex_unlock(&gzvm->lock);
++	mutex_unlock(&gzvm->ioevent_lock);
+ 
+ 	/* got in the front of this function */
+ 	eventfd_ctx_put(evt_ctx);
+@@ -165,14 +164,15 @@
+ 		evt->wildcard = true;
+ 	}
+ 
++	mutex_lock(&gzvm->ioevent_lock);
+ 	if (ioeventfd_check_collision(gzvm, evt)) {
+ 		ret = -EEXIST;
++		mutex_unlock(&gzvm->ioevent_lock);
+ 		goto err_free;
+ 	}
+ 
+-	mutex_lock(&gzvm->lock);
+ 	list_add_tail(&evt->list, &gzvm->ioevents);
+-	mutex_unlock(&gzvm->lock);
++	mutex_unlock(&gzvm->ioevent_lock);
+ 
+ 	return 0;
+ 
+@@ -259,18 +259,33 @@
+ {
+ 	struct gzvm_ioevent *e;
+ 
++	mutex_lock(&vcpu->gzvm->ioevent_lock);
+ 	list_for_each_entry(e, &vcpu->gzvm->ioevents, list) {
+ 		if (gzvm_ioevent_in_range(e, addr, len, val)) {
+ 			eventfd_signal(e->evt_ctx, 1);
++			mutex_unlock(&vcpu->gzvm->ioevent_lock);
+ 			return true;
+ 		}
+ 	}
++
++	mutex_unlock(&vcpu->gzvm->ioevent_lock);
+ 	return false;
+ }
+ 
+ int gzvm_init_ioeventfd(struct gzvm *gzvm)
+ {
+ 	INIT_LIST_HEAD(&gzvm->ioevents);
++	mutex_init(&gzvm->ioevent_lock);
+ 
+ 	return 0;
+ }
++
++void gzvm_vm_ioeventfd_release(struct gzvm *gzvm)
++{
++	struct gzvm_ioevent *p, *tmp;
++
++	mutex_lock(&gzvm->ioevent_lock);
++	list_for_each_entry_safe(p, tmp, &gzvm->ioevents, list)
++		gzvm_ioevent_release(p);
++	mutex_unlock(&gzvm->ioevent_lock);
++}
+diff -ruN a/drivers/virt/geniezone/gzvm_irqfd.c b/drivers/virt/geniezone/gzvm_irqfd.c
+--- a/drivers/virt/geniezone/gzvm_irqfd.c
++++ b/drivers/virt/geniezone/gzvm_irqfd.c
+@@ -5,7 +5,7 @@
+ 
+ #include <linux/eventfd.h>
+ #include <linux/syscalls.h>
+-#include <linux/gzvm_drv.h>
++#include <linux/soc/mediatek/gzvm_drv.h>
+ #include "gzvm_common.h"
+ 
+ struct gzvm_irq_ack_notifier {
+@@ -354,6 +354,8 @@
+ 	 * Block until we know all outstanding shutdown jobs have completed.
+ 	 */
+ 	flush_workqueue(irqfd_cleanup_wq);
++
++	cleanup_srcu_struct(&gzvm->irq_srcu);
+ }
+ 
+ /**
+diff -ruN a/drivers/virt/geniezone/gzvm_main.c b/drivers/virt/geniezone/gzvm_main.c
+--- a/drivers/virt/geniezone/gzvm_main.c
++++ b/drivers/virt/geniezone/gzvm_main.c
+@@ -3,14 +3,144 @@
+  * Copyright (c) 2023 MediaTek Inc.
+  */
+ 
++#include <linux/debugfs.h>
+ #include <linux/device.h>
+ #include <linux/file.h>
+ #include <linux/kdev_t.h>
++#include <linux/kobject.h>
+ #include <linux/miscdevice.h>
+ #include <linux/module.h>
+ #include <linux/of.h>
+ #include <linux/platform_device.h>
+-#include <linux/gzvm_drv.h>
++#include <linux/sysfs.h>
++#include <linux/soc/mediatek/gzvm_drv.h>
++
++static struct gzvm_driver gzvm_drv = {
++	.drv_version = {
++		.major = GZVM_DRV_MAJOR_VERSION,
++		.minor = GZVM_DRV_MINOR_VERSION,
++		.sub = 0,
++	},
++};
++
++static ssize_t demand_paging_batch_pages_show(struct kobject *kobj,
++					      struct kobj_attribute *attr,
++					      char *buf)
++{
++	return sprintf(buf, "%u\n", gzvm_drv.demand_paging_batch_pages);
++}
++
++static ssize_t demand_paging_batch_pages_store(struct kobject *kobj,
++					       struct kobj_attribute *attr,
++					       const char *buf, size_t count)
++{
++	int ret;
++	u32 temp;
++
++	ret = kstrtoint(buf, 10, &temp);
++	if (ret < 0)
++		return ret;
++
++	if (temp == 0 || (PMD_SIZE % (PAGE_SIZE * temp)) != 0)
++		return -EINVAL;
++
++	gzvm_drv.demand_paging_batch_pages = temp;
++
++	return count;
++}
++
++static ssize_t destroy_batch_pages_show(struct kobject *kobj,
++					struct kobj_attribute *attr,
++					char *buf)
++{
++	return sprintf(buf, "%u\n", gzvm_drv.destroy_batch_pages);
++}
++
++static ssize_t destroy_batch_pages_store(struct kobject *kobj,
++					 struct kobj_attribute *attr,
++					 const char *buf, size_t count)
++{
++	int ret;
++	u32 temp;
++
++	ret = kstrtoint(buf, 10, &temp);
++	if (ret < 0)
++		return ret;
++
++	// destroy page batch size should be power of 2
++	if ((temp & (temp - 1)) != 0)
++		return -EINVAL;
++
++	gzvm_drv.destroy_batch_pages = temp;
++
++	return count;
++}
++
++/* /sys/kernel/gzvm/demand_paging_batch_pages */
++static struct kobj_attribute demand_paging_batch_pages_attr = {
++		.attr = {
++			.name = "demand_paging_batch_pages",
++			.mode = 0660,
++		},
++		.show = demand_paging_batch_pages_show,
++		.store = demand_paging_batch_pages_store,
++};
++
++/* /sys/kernel/gzvm/destroy_batch_pages */
++static struct kobj_attribute destroy_batch_pages_attr = {
++		.attr = {
++			.name = "destroy_batch_pages",
++			.mode = 0660,
++		},
++		.show = destroy_batch_pages_show,
++		.store = destroy_batch_pages_store,
++};
++
++static int gzvm_drv_sysfs_init(void)
++{
++	int ret = 0;
++
++	gzvm_drv.sysfs_root_dir = kobject_create_and_add("gzvm", kernel_kobj);
++
++	if (!gzvm_drv.sysfs_root_dir)
++		return -ENOMEM;
++
++	ret = sysfs_create_file(gzvm_drv.sysfs_root_dir,
++				&demand_paging_batch_pages_attr.attr);
++	if (ret)
++		pr_debug("failed to create demand_batch_pages in /sys/kernel/gzvm\n");
++
++	ret = sysfs_create_file(gzvm_drv.sysfs_root_dir,
++				&destroy_batch_pages_attr.attr);
++	if (ret)
++		pr_debug("failed to create destroy_batch_pages in /sys/kernel/gzvm\n");
++
++	return ret;
++}
++
++static void gzvm_drv_sysfs_exit(void)
++{
++	kobject_del(gzvm_drv.sysfs_root_dir);
++}
++
++static int gzvm_drv_debug_init(void)
++{
++	if (!debugfs_initialized()) {
++		pr_warn("debugfs not initialized!\n");
++		return 0;
++	}
++
++	gzvm_drv.gzvm_debugfs_dir = debugfs_create_dir("gzvm", NULL);
++	if (!gzvm_drv.gzvm_debugfs_dir)
++		return -ENOMEM;
++
++	return 0;
++}
++
++static void gzvm_drv_debug_exit(void)
++{
++	debugfs_remove_recursive(gzvm_drv.gzvm_debugfs_dir);
++}
+ 
+ /**
+  * gzvm_err_to_errno() - Convert geniezone return value to standard errno
+@@ -31,11 +161,13 @@
+ 	case ERR_INVALID_ARGS:
+ 		return -EINVAL;
+ 	case ERR_NOT_SUPPORTED:
+-		return -EOPNOTSUPP;
++		fallthrough;
+ 	case ERR_NOT_IMPLEMENTED:
+ 		return -EOPNOTSUPP;
+ 	case ERR_FAULT:
+ 		return -EFAULT;
++	case ERR_BUSY:
++		return -EAGAIN;
+ 	default:
+ 		break;
+ 	}
+@@ -68,17 +200,13 @@
+ static long gzvm_dev_ioctl(struct file *filp, unsigned int cmd,
+ 			   unsigned long user_args)
+ {
+-	long ret;
+-
+ 	switch (cmd) {
+ 	case GZVM_CREATE_VM:
+-		ret = gzvm_dev_ioctl_create_vm(user_args);
+-		return ret;
++		return gzvm_dev_ioctl_create_vm(&gzvm_drv, user_args);
+ 	case GZVM_CHECK_EXTENSION:
+ 		if (!user_args)
+ 			return -EINVAL;
+-		ret = gzvm_dev_ioctl_check_extension(NULL, user_args);
+-		return ret;
++		return gzvm_dev_ioctl_check_extension(NULL, user_args);
+ 	default:
+ 		break;
+ 	}
+@@ -86,9 +214,27 @@
+ 	return -ENOTTY;
+ }
+ 
++static int gzvm_dev_open(struct inode *inode, struct file *file)
++{
++	/*
++	 * Reference count to prevent this module is unload without destroying
++	 * VM
++	 */
++	try_module_get(THIS_MODULE);
++	return 0;
++}
++
++static int gzvm_dev_release(struct inode *inode, struct file *file)
++{
++	module_put(THIS_MODULE);
++	return 0;
++}
++
+ static const struct file_operations gzvm_chardev_ops = {
+ 	.unlocked_ioctl = gzvm_dev_ioctl,
+ 	.llseek		= noop_llseek,
++	.open		= gzvm_dev_open,
++	.release	= gzvm_dev_release,
+ };
+ 
+ static struct miscdevice gzvm_dev = {
+@@ -97,31 +243,97 @@
+ 	.fops = &gzvm_chardev_ops,
+ };
+ 
++static int gzvm_query_hyp_batch_pages(void)
++{
++	struct gzvm_enable_cap cap = {0};
++	int ret;
++
++	gzvm_drv.demand_paging_batch_pages = GZVM_DRV_DEMAND_PAGING_BATCH_PAGES;
++	cap.cap = GZVM_CAP_QUERY_HYP_BATCH_PAGES;
++
++	ret = gzvm_arch_query_hyp_batch_pages(&cap, NULL);
++	if (!ret)
++		gzvm_drv.demand_paging_batch_pages = cap.args[0];
++
++	/*
++	 * We have initialized demand_paging_batch_pages, and to maintain
++	 * compatibility with older GZ version, we can ignore the return value.
++	 */
++	if (ret == -EINVAL)
++		return 0;
++	return ret;
++}
++
++static int gzvm_query_destroy_batch_pages(void)
++{
++	int ret;
++	struct gzvm_enable_cap cap = {0};
++
++	gzvm_drv.destroy_batch_pages = GZVM_DRV_DESTROY_PAGING_BATCH_PAGES;
++	cap.cap = GZVM_CAP_QUERY_DESTROY_BATCH_PAGES;
++
++	ret = gzvm_arch_query_destroy_batch_pages(&cap, NULL);
++	if (!ret)
++		gzvm_drv.destroy_batch_pages = cap.args[0];
++	return ret;
++}
++
+ static int gzvm_drv_probe(struct platform_device *pdev)
+ {
+ 	int ret;
+ 
+-	if (gzvm_arch_probe() != 0) {
++	if (gzvm_arch_probe(gzvm_drv.drv_version, &gzvm_drv.hyp_version) != 0) {
+ 		dev_err(&pdev->dev, "Not found available conduit\n");
+ 		return -ENODEV;
+ 	}
+ 
++	pr_info("Found GenieZone hypervisor version %u.%u.%llu\n",
++		 gzvm_drv.hyp_version.major, gzvm_drv.hyp_version.minor,
++		 gzvm_drv.hyp_version.sub);
++
++	ret = gzvm_arch_drv_init();
++	if (ret)
++		return ret;
++
+ 	ret = misc_register(&gzvm_dev);
+ 	if (ret)
+ 		return ret;
+ 
+-	return gzvm_drv_irqfd_init();
++	ret = gzvm_drv_irqfd_init();
++	if (ret)
++		return ret;
++
++	ret = gzvm_drv_debug_init();
++	if (ret)
++		return ret;
++
++	ret = gzvm_drv_sysfs_init();
++	if (ret)
++		return ret;
++
++	ret = gzvm_query_hyp_batch_pages();
++	if (ret)
++		return ret;
++
++	ret = gzvm_query_destroy_batch_pages();
++	if (ret)
++		return ret;
++
++	return 0;
+ }
+ 
+ static int gzvm_drv_remove(struct platform_device *pdev)
+ {
+ 	gzvm_drv_irqfd_exit();
+-	gzvm_destroy_all_vms();
+ 	misc_deregister(&gzvm_dev);
++	gzvm_drv_debug_exit();
++	gzvm_drv_sysfs_exit();
+ 	return 0;
+ }
+ 
+ static const struct of_device_id gzvm_of_match[] = {
++	{ .compatible = "mediatek,geniezone" },
++	/* PadVM: name used by the 6.1-era OPD2407 device tree */
+ 	{ .compatible = "mediatek,geniezone-hyp" },
+ 	{/* sentinel */},
+ };
+@@ -131,12 +343,64 @@
+ 	.remove = gzvm_drv_remove,
+ 	.driver = {
+ 		.name = KBUILD_MODNAME,
+-		.owner = THIS_MODULE,
+ 		.of_match_table = gzvm_of_match,
+ 	},
+ };
+ 
+-module_platform_driver(gzvm_driver);
++/*
++ * PadVM: the OPD2407 device tree ships /hypervisor with status "disabled",
++ * so the platform bus never creates a device and the probe hypercall is never
++ * issued. With gzvm.force_probe (default on), register a DT-less platform
++ * device so the normal probe runs. The firmware accepts the probe on this
++ * device; gzvm.force_probe=0 restores stock behaviour.
++ */
++static bool force_probe = true;
++module_param(force_probe, bool, 0444);
++MODULE_PARM_DESC(force_probe, "Probe GenieZone even if the DT node is disabled");
++
++static struct platform_device *gzvm_forced_pdev;
++
++static bool gzvm_dt_node_available(void)
++{
++	const struct of_device_id *id;
++	struct device_node *np;
++
++	for (id = gzvm_of_match; id->compatible[0]; id++) {
++		np = of_find_compatible_node(NULL, NULL, id->compatible);
++		if (np && of_device_is_available(np)) {
++			of_node_put(np);
++			return true;
++		}
++		of_node_put(np);
++	}
++	return false;
++}
++
++static int __init gzvm_init(void)
++{
++	int ret;
++
++	ret = platform_driver_register(&gzvm_driver);
++	if (ret || !force_probe || gzvm_dt_node_available())
++		return ret;
++
++	pr_info("gzvm: force_probe set, registering platform device without DT node\n");
++	gzvm_forced_pdev = platform_device_register_simple(KBUILD_MODNAME, -1, NULL, 0);
++	if (IS_ERR(gzvm_forced_pdev)) {
++		pr_err("gzvm: forced platform device failed: %ld\n", PTR_ERR(gzvm_forced_pdev));
++		gzvm_forced_pdev = NULL;
++	}
++	return 0;
++}
++module_init(gzvm_init);
++
++static void __exit gzvm_exit(void)
++{
++	if (gzvm_forced_pdev)
++		platform_device_unregister(gzvm_forced_pdev);
++	platform_driver_unregister(&gzvm_driver);
++}
++module_exit(gzvm_exit);
+ 
+ MODULE_DEVICE_TABLE(of, gzvm_of_match);
+ MODULE_AUTHOR("MediaTek");
+diff -ruN a/drivers/virt/geniezone/gzvm_mmu.c b/drivers/virt/geniezone/gzvm_mmu.c
+--- a/drivers/virt/geniezone/gzvm_mmu.c
++++ b/drivers/virt/geniezone/gzvm_mmu.c
+@@ -3,109 +3,8 @@
+  * Copyright (c) 2023 MediaTek Inc.
+  */
+ 
+-#include <linux/gzvm_drv.h>
+-
+-/**
+- * hva_to_pa_fast() - converts hva to pa in generic fast way
+- * @hva: Host virtual address.
+- *
+- * Return: GZVM_PA_ERR_BAD for translation error
+- */
+-u64 hva_to_pa_fast(u64 hva)
+-{
+-	struct page *page[1];
+-	u64 pfn;
+-
+-	if (get_user_page_fast_only(hva, 0, page)) {
+-		pfn = page_to_phys(page[0]);
+-		put_page((struct page *)page);
+-		return pfn;
+-	}
+-	return GZVM_PA_ERR_BAD;
+-}
+-
+-/**
+- * hva_to_pa_slow() - converts hva to pa in a slow way
+- * @hva: Host virtual address
+- *
+- * This function converts HVA to PA in a slow way because the target hva is not
+- * yet allocated and mapped in the host stage1 page table, we cannot find it
+- * directly from current page table.
+- * Thus, we have to allocate it and this operation is much slower than directly
+- * find via current page table.
+- *
+- * Context: This function may sleep
+- * Return: PA or GZVM_PA_ERR_BAD for translation error
+- */
+-u64 hva_to_pa_slow(u64 hva)
+-{
+-	struct page *page = NULL;
+-	u64 pfn = 0;
+-	int npages;
+-
+-	npages = get_user_pages_unlocked(hva, 1, &page, 0);
+-	if (npages != 1)
+-		return GZVM_PA_ERR_BAD;
+-
+-	if (page) {
+-		pfn = page_to_phys(page);
+-		put_page(page);
+-		return pfn;
+-	}
+-
+-	return GZVM_PA_ERR_BAD;
+-}
+-
+-static u64 __gzvm_gfn_to_pfn_memslot(struct gzvm_memslot *memslot, u64 gfn)
+-{
+-	u64 hva, pa;
+-
+-	hva = gzvm_gfn_to_hva_memslot(memslot, gfn);
+-
+-	pa = gzvm_hva_to_pa_arch(hva);
+-	if (pa != GZVM_PA_ERR_BAD)
+-		return PHYS_PFN(pa);
+-
+-	pa = hva_to_pa_fast(hva);
+-	if (pa != GZVM_PA_ERR_BAD)
+-		return PHYS_PFN(pa);
+-
+-	pa = hva_to_pa_slow(hva);
+-	if (pa != GZVM_PA_ERR_BAD)
+-		return PHYS_PFN(pa);
+-
+-	return GZVM_PA_ERR_BAD;
+-}
+-
+-/**
+- * gzvm_gfn_to_pfn_memslot() - Translate gfn (guest ipa) to pfn (host pa),
+- *			       result is in @pfn
+- * @memslot: Pointer to struct gzvm_memslot.
+- * @gfn: Guest frame number.
+- * @pfn: Host page frame number.
+- *
+- * Return:
+- * * 0			- Succeed
+- * * -EFAULT		- Failed to convert
+- */
+-int gzvm_gfn_to_pfn_memslot(struct gzvm_memslot *memslot, u64 gfn,
+-			    u64 *pfn)
+-{
+-	u64 __pfn;
+-
+-	if (!memslot)
+-		return -EFAULT;
+-
+-	__pfn = __gzvm_gfn_to_pfn_memslot(memslot, gfn);
+-	if (__pfn == GZVM_PA_ERR_BAD) {
+-		*pfn = 0;
+-		return -EFAULT;
+-	}
+-
+-	*pfn = __pfn;
+-
+-	return 0;
+-}
++#include <linux/soc/mediatek/gzvm_drv.h>
++#include <trace/hooks/gzvm.h>
+ 
+ static int cmp_ppages(struct rb_node *node, const struct rb_node *parent)
+ {
+@@ -123,6 +22,14 @@
+ 	return 0;
+ }
+ 
++/* Invoker of this function is responsible for locking */
++static int gzvm_insert_ppage(struct gzvm *vm, struct gzvm_pinned_page *ppage)
++{
++	if (rb_find_add(&ppage->node, &vm->pinned_pages, cmp_ppages))
++		return -EEXIST;
++	return 0;
++}
++
+ static int rb_ppage_cmp(const void *key, const struct rb_node *node)
+ {
+ 	struct gzvm_pinned_page *p = container_of(node,
+@@ -133,38 +40,83 @@
+ 	return (ipa < p->ipa) ? -1 : (ipa > p->ipa);
+ }
+ 
+-static int gzvm_insert_ppage(struct gzvm *vm, struct gzvm_pinned_page *ppage)
++/* Invoker of this function is responsible for locking */
++static int gzvm_remove_ppage(struct gzvm *vm, phys_addr_t ipa)
+ {
+-	if (rb_find_add(&ppage->node, &vm->pinned_pages, cmp_ppages))
+-		return -EEXIST;
++	struct gzvm_pinned_page *ppage;
++	struct rb_node *node;
++
++	node = rb_find((void *)ipa, &vm->pinned_pages, rb_ppage_cmp);
++
++	if (node)
++		rb_erase(node, &vm->pinned_pages);
++	else
++		return 0;
++
++	ppage = container_of(node, struct gzvm_pinned_page, node);
++	unpin_user_pages_dirty_lock(&ppage->page, 1, true);
++	kfree(ppage);
++
+ 	return 0;
+ }
+ 
+-static int pin_one_page(struct gzvm *vm, unsigned long hva, u64 gpa)
++static int pin_one_page(struct gzvm *vm, unsigned long hva, u64 gpa,
++			struct page **out_page)
+ {
+ 	unsigned int flags = FOLL_HWPOISON | FOLL_LONGTERM | FOLL_WRITE;
+ 	struct gzvm_pinned_page *ppage = NULL;
+ 	struct mm_struct *mm = current->mm;
+ 	struct page *page = NULL;
++	int ret;
+ 
+ 	ppage = kmalloc(sizeof(*ppage), GFP_KERNEL_ACCOUNT);
+ 	if (!ppage)
+ 		return -ENOMEM;
+ 
+ 	mmap_read_lock(mm);
+-	pin_user_pages(hva, 1, flags, &page, NULL);
++	/* PadVM: 6.1 pin_user_pages() still takes a vmas argument. */
++	ret = pin_user_pages(hva, 1, flags, &page, NULL);
+ 	mmap_read_unlock(mm);
+ 
+-	if (!page) {
++	if (ret != 1 || !page) {
+ 		kfree(ppage);
+ 		return -EFAULT;
+ 	}
+ 
+ 	ppage->page = page;
+ 	ppage->ipa = gpa;
+-	gzvm_insert_ppage(vm, ppage);
+ 
+-	return 0;
++	ret = gzvm_insert_ppage(vm, ppage);
++
++	/**
++	 * The return of -EEXIST from gzvm_insert_ppage is considered an
++	 * expected behavior in this context.
++	 * This situation arises when two or more VCPUs are concurrently
++	 * engaged in demand paging handling. The initial VCPU has already
++	 * allocated and pinned a page, while the subsequent VCPU attempts
++	 * to pin the same page again. As a result, we prompt the unpinning
++	 * and release of the allocated structure, followed by a return 0.
++	 * If the existing entry maps a different page (e.g. the HVA has been
++	 * remapped), fail with -EFAULT.
++	 */
++	if (ret == -EEXIST) {
++		struct gzvm_pinned_page *existing;
++		struct rb_node *node;
++
++		kfree(ppage);
++		unpin_user_pages(&page, 1);
++
++		node = rb_find((void *)gpa, &vm->pinned_pages, rb_ppage_cmp);
++		if (!node)
++			return -EFAULT;
++		existing = rb_entry(node, struct gzvm_pinned_page, node);
++		if (existing->page != page)
++			return -EFAULT;
++		ret = 0;
++	}
++	*out_page = page;
++
++	return ret;
+ }
+ 
+ /**
+@@ -177,84 +129,120 @@
+  */
+ int gzvm_handle_relinquish(struct gzvm_vcpu *vcpu, phys_addr_t ipa)
+ {
+-	struct gzvm_pinned_page *ppage;
+-	struct rb_node *node;
+ 	struct gzvm *vm = vcpu->gzvm;
+ 
+-	node = rb_find((void *)ipa, &vm->pinned_pages, rb_ppage_cmp);
+-
+-	if (node)
+-		rb_erase(node, &vm->pinned_pages);
+-	else
+-		return 0;
++	mutex_lock(&vm->mem_lock);
++	gzvm_remove_ppage(vm, ipa);
++	mutex_unlock(&vm->mem_lock);
+ 
+-	ppage = container_of(node, struct gzvm_pinned_page, node);
+-	unpin_user_pages_dirty_lock(&ppage->page, 1, true);
+-	kfree(ppage);
+ 	return 0;
+ }
+ 
+-static int handle_block_demand_page(struct gzvm *vm, int memslot_id, u64 gfn)
++int gzvm_vm_allocate_guest_page(struct gzvm *vm, struct gzvm_memslot *slot,
++				u64 gfn, u64 *pfn)
+ {
++	struct page *page = NULL;
+ 	unsigned long hva;
+-	u64 pfn, __gfn;
+-	int ret, i;
++	int ret;
+ 
+-	u32 nr_entries = GZVM_BLOCK_BASED_DEMAND_PAGE_SIZE / PAGE_SIZE;
+-	struct gzvm_memslot *memslot = &vm->memslot[memslot_id];
+-	u64 start_gfn = ALIGN_DOWN(gfn, nr_entries);
+-	u32 total_pages = memslot->npages;
+-	u64 base_gfn = memslot->base_gfn;
++	if (gzvm_gfn_to_hva_memslot(slot, gfn, (u64 *)&hva) != 0)
++		return -EINVAL;
+ 
+-	/* if the demand region is less than a block, adjust the nr_entries */
+-	if (start_gfn + nr_entries > base_gfn + total_pages)
+-		nr_entries = base_gfn + total_pages - start_gfn;
++	ret = pin_one_page(vm, hva, PFN_PHYS(gfn), &page);
++	if (ret != 0)
++		return ret;
+ 
+-	mutex_lock(&vm->demand_paging_lock);
+-	for (i = 0, __gfn = start_gfn; i < nr_entries; i++, __gfn++) {
+-		ret = gzvm_gfn_to_pfn_memslot(&vm->memslot[memslot_id], __gfn,
+-					      &pfn);
+-		if (unlikely(ret)) {
+-			ret = -ERR_FAULT;
+-			goto err_unlock;
+-		}
+-		vm->demand_page_buffer[i] = pfn;
++	if (page == NULL)
++		return -EFAULT;
++	/**
++	 * As `pin_user_pages` already gets the page struct, we don't need to
++	 * call other APIs to reduce function call overhead.
++	 */
++	*pfn = page_to_pfn(page);
+ 
+-		hva = gzvm_gfn_to_hva_memslot(&vm->memslot[memslot_id], __gfn);
+-		ret = pin_one_page(vm, hva, PFN_PHYS(__gfn));
+-		if (ret)
+-			goto err_unlock;
++	return 0;
++}
++
++static int handle_single_demand_page(struct gzvm *vm, int memslot_id, u64 gfn)
++{
++	int ret;
++	u64 pfn;
++
++	mutex_lock(&vm->mem_lock);
++
++	ret = gzvm_vm_allocate_guest_page(vm, &vm->memslot[memslot_id], gfn, &pfn);
++	if (unlikely(ret)) {
++		ret = -EFAULT;
++		goto err_unlock;
+ 	}
+ 
+-	ret = gzvm_arch_map_guest_block(vm->vm_id, memslot_id, start_gfn,
+-					nr_entries);
++	trace_android_vh_gzvm_handle_demand_page_pre(vm, memslot_id, pfn, gfn, 1);
++
++	ret = gzvm_arch_map_guest(vm->vm_id, memslot_id, pfn, gfn, 1);
+ 	if (unlikely(ret)) {
+ 		ret = -EFAULT;
+ 		goto err_unlock;
+ 	}
+ 
+-err_unlock:
+-	mutex_unlock(&vm->demand_paging_lock);
++	trace_android_vh_gzvm_handle_demand_page_post(vm, memslot_id, pfn, gfn, 1);
+ 
++err_unlock:
++	mutex_unlock(&vm->mem_lock);
+ 	return ret;
+ }
+ 
+-static int handle_single_demand_page(struct gzvm *vm, int memslot_id, u64 gfn)
++static int handle_block_demand_page(struct gzvm *vm, int memslot_id, u64 gfn)
+ {
+-	unsigned long hva;
+-	int ret;
+-	u64 pfn;
++	u32 nr_entries_all = GZVM_BLOCK_BASED_DEMAND_PAGE_SIZE / PAGE_SIZE;
++	u32 nr_entries = vm->gzvm_drv->demand_paging_batch_pages;
++	struct gzvm_memslot *memslot = &vm->memslot[memslot_id];
++	u64 start_gfn = ALIGN_DOWN(gfn, nr_entries_all);
++	u32 total_pages = memslot->npages;
++	u64 base_gfn = memslot->base_gfn;
++	u64 pfn, __gfn;
++	int ret, i;
+ 
+-	ret = gzvm_gfn_to_pfn_memslot(&vm->memslot[memslot_id], gfn, &pfn);
+-	if (unlikely(ret))
+-		return -EFAULT;
++	if (start_gfn < base_gfn)
++		start_gfn = base_gfn;
+ 
+-	ret = gzvm_arch_map_guest(vm->vm_id, memslot_id, pfn, gfn, 1);
+-	if (unlikely(ret))
+-		return -EFAULT;
++	u64 end_gfn = start_gfn + nr_entries_all;
++
++	if (start_gfn + nr_entries_all > base_gfn + total_pages)
++		end_gfn = base_gfn + total_pages;
++
++	mutex_lock(&vm->demand_paging_lock);
++	mutex_lock(&vm->mem_lock);
++	for (; start_gfn < end_gfn; start_gfn += nr_entries)  {
++		/*
++		 * If the start/end gfn of this demand paging block is outside the
++		 * memory region of memslot, adjust the start_gfn/nr_entries.
++		 */
++		if (start_gfn + nr_entries > base_gfn + total_pages)
++			nr_entries = base_gfn + total_pages - start_gfn;
++
++		for (i = 0, __gfn = start_gfn; i < nr_entries; i++, __gfn++) {
++			ret = gzvm_vm_allocate_guest_page(vm, memslot, __gfn,
++							  &pfn);
++			if (unlikely(ret)) {
++				pr_notice("VM-%u failed to allocate page for GFN 0x%llx (%d)\n",
++					  vm->vm_id, __gfn, ret);
++				ret = -ERR_FAULT;
++				goto err_unlock;
++			}
++			vm->demand_page_buffer[i] = pfn;
++		}
+ 
+-	hva = gzvm_gfn_to_hva_memslot(&vm->memslot[memslot_id], gfn);
+-	return pin_one_page(vm, hva, PFN_PHYS(gfn));
++		ret = gzvm_arch_map_guest_block(vm->vm_id, memslot_id,
++						start_gfn, nr_entries);
++		if (unlikely(ret)) {
++			ret = -EFAULT;
++			goto err_unlock;
++		}
++	}
++err_unlock:
++	mutex_unlock(&vm->mem_lock);
++	mutex_unlock(&vm->demand_paging_lock);
++	return ret;
+ }
+ 
+ /**
+@@ -277,6 +265,9 @@
+ 	if (unlikely(memslot_id < 0))
+ 		return -EFAULT;
+ 
++	if (unlikely(vm->mem_alloc_mode == GZVM_FULLY_POPULATED))
++		return -EFAULT;
++
+ 	if (vm->demand_page_gran == PAGE_SIZE)
+ 		return handle_single_demand_page(vm, memslot_id, gfn);
+ 	else
+diff -ruN a/drivers/virt/geniezone/gzvm_vcpu.c b/drivers/virt/geniezone/gzvm_vcpu.c
+--- a/drivers/virt/geniezone/gzvm_vcpu.c
++++ b/drivers/virt/geniezone/gzvm_vcpu.c
+@@ -3,18 +3,62 @@
+  * Copyright (c) 2023 MediaTek Inc.
+  */
+ 
+-#include <asm/sysreg.h>
+ #include <linux/anon_inodes.h>
+ #include <linux/device.h>
+ #include <linux/file.h>
+ #include <linux/mm.h>
+ #include <linux/platform_device.h>
+ #include <linux/slab.h>
+-#include <linux/gzvm_drv.h>
++#include <trace/events/geniezone.h>
++#include <linux/soc/mediatek/gzvm_drv.h>
++#include <trace/hooks/gzvm.h>
+ 
+ /* maximum size needed for holding an integer */
+ #define ITOA_MAX_LEN 12
+ 
++/**
++ * gzvm_vcpu_wakeup_all - wakes up all vCPUs associated with the specified
++ * gzvm.
++ * @gzvm: Pointer to gzvm structure.
++ */
++void gzvm_vcpu_wakeup_all(struct gzvm *gzvm)
++{
++	for (int i = 0; i < GZVM_MAX_VCPUS; i++) {
++		if (gzvm->vcpus[i]) {
++			gzvm->vcpus[i]->idle_events.virtio_irq += 1;
++			rcuwait_wake_up(&gzvm->vcpus[i]->wait);
++		}
++	}
++}
++
++static enum hrtimer_restart gzvm_vtimer_expire(struct hrtimer *hrt)
++{
++	struct gzvm_vcpu *vcpu;
++
++	vcpu = container_of(hrt, struct gzvm_vcpu, gzvm_vtimer);
++
++	gzvm_vcpu_wakeup_all(vcpu->gzvm);
++
++	return HRTIMER_NORESTART;
++}
++
++static void gzvm_vtimer_init(struct gzvm_vcpu *vcpu)
++{
++	/* gzvm_vtimer init based on hrtimer */
++	hrtimer_init(&vcpu->gzvm_vtimer, CLOCK_MONOTONIC, HRTIMER_MODE_ABS_HARD);
++	vcpu->gzvm_vtimer.function = gzvm_vtimer_expire;
++}
++
++void gzvm_vtimer_set(struct gzvm_vcpu *vcpu, u64 ns)
++{
++	hrtimer_start(&vcpu->gzvm_vtimer, ktime_add_ns(ktime_get(), ns), HRTIMER_MODE_ABS_HARD);
++}
++
++void gzvm_vtimer_release(struct gzvm_vcpu *vcpu)
++{
++	hrtimer_cancel(&vcpu->gzvm_vtimer);
++}
++
+ static long gzvm_vcpu_update_one_reg(struct gzvm_vcpu *vcpu,
+ 				     void __user *argp,
+ 				     bool is_write)
+@@ -28,7 +72,7 @@
+ 	if (copy_from_user(&reg, argp, sizeof(reg)))
+ 		return -EFAULT;
+ 
+-	reg_addr = (void __user *)reg.addr;
++	reg_addr = u64_to_user_ptr(reg.addr);
+ 	reg_size = (reg.id & GZVM_REG_SIZE_MASK) >> GZVM_REG_SIZE_SHIFT;
+ 	reg_size = BIT(reg_size);
+ 
+@@ -88,7 +132,7 @@
+ static long gzvm_vcpu_run(struct gzvm_vcpu *vcpu, void __user *argp)
+ {
+ 	bool need_userspace = false;
+-	u64 exit_reason = 0;
++	u64 exit_reason;
+ 
+ 	if (copy_from_user(vcpu->run, argp, sizeof(struct gzvm_vcpu_run)))
+ 		return -EFAULT;
+@@ -103,6 +147,7 @@
+ 
+ 	while (!need_userspace && !signal_pending(current)) {
+ 		gzvm_arch_vcpu_run(vcpu, &exit_reason);
++		trace_mtk_vcpu_exit(exit_reason);
+ 
+ 		switch (exit_reason) {
+ 		case GZVM_EXIT_MMIO:
+@@ -136,16 +181,21 @@
+ 			fallthrough;
+ 		case GZVM_EXIT_GZ:
+ 			break;
++		case GZVM_EXIT_IDLE:
++			gzvm_handle_guest_idle(vcpu);
++			break;
++		case GZVM_EXIT_IPI:
++			gzvm_handle_guest_ipi(vcpu);
++			break;
+ 		case GZVM_EXIT_UNKNOWN:
+ 			fallthrough;
+ 		default:
+ 			pr_err("vcpu unknown exit\n");
+ 			need_userspace = true;
+-			goto out;
+ 		}
++		trace_android_vh_gzvm_vcpu_exit_reason(vcpu, &need_userspace);
+ 	}
+ 
+-out:
+ 	if (copy_to_user(argp, vcpu->run, sizeof(struct gzvm_vcpu_run)))
+ 		return -EFAULT;
+ 	if (signal_pending(current)) {
+@@ -163,6 +213,13 @@
+ 	void __user *argp = (void __user *)arg;
+ 	struct gzvm_vcpu *vcpu = filp->private_data;
+ 
++	/*
++	 * Reject ioctls issued by a process other than the VM creator
++	 * (cf. KVM's kvm->mm check).
++	 */
++	if (vcpu->gzvm->mm != current->mm)
++		return -EIO;
++
+ 	switch (ioctl) {
+ 	case GZVM_RUN:
+ 		ret = gzvm_vcpu_run(vcpu, argp);
+@@ -182,7 +239,16 @@
+ 	return ret;
+ }
+ 
++static int gzvm_vcpu_release(struct inode *inode, struct file *filp)
++{
++	struct gzvm_vcpu *vcpu = filp->private_data;
++
++	gzvm_vm_put(vcpu->gzvm);
++	return 0;
++}
++
+ static const struct file_operations gzvm_vcpu_fops = {
++	.release	= gzvm_vcpu_release,
+ 	.unlocked_ioctl = gzvm_vcpu_ioctl,
+ 	.llseek		= noop_llseek,
+ };
+@@ -193,6 +259,7 @@
+ 	if (!vcpu)
+ 		return;
+ 
++	hrtimer_cancel(&vcpu->gzvm_vtimer);
+ 	gzvm_arch_destroy_vcpu(vcpu->gzvm->vm_id, vcpu->vcpuid);
+ 	/* clean guest's data */
+ 	memset(vcpu->run, 0, GZVM_VCPU_RUN_MAP_SIZE);
+@@ -261,19 +328,33 @@
+ 	vcpu->vcpuid = cpuid;
+ 	vcpu->gzvm = gzvm;
+ 	mutex_init(&vcpu->lock);
++	gzvm_vtimer_init(vcpu);
++
++	mutex_lock(&gzvm->lock);
++	if (gzvm->vcpus[cpuid]) {
++		ret = -EEXIST;
++		goto free_vcpu_run;
++	}
+ 
+ 	ret = gzvm_arch_create_vcpu(gzvm->vm_id, vcpu->vcpuid, vcpu->run);
+ 	if (ret < 0)
+ 		goto free_vcpu_run;
+ 
++	gzvm_vm_get(gzvm);
++
+ 	ret = create_vcpu_fd(vcpu);
+ 	if (ret < 0)
+-		goto free_vcpu_run;
++		goto put_vm;
+ 	gzvm->vcpus[cpuid] = vcpu;
++	mutex_unlock(&gzvm->lock);
+ 
+ 	return ret;
+ 
++put_vm:
++	gzvm_vm_put(gzvm);
++	gzvm_arch_destroy_vcpu(gzvm->vm_id, vcpu->vcpuid);
+ free_vcpu_run:
++	mutex_unlock(&gzvm->lock);
+ 	free_pages_exact(vcpu->run, GZVM_VCPU_RUN_MAP_SIZE);
+ free_vcpu:
+ 	kfree(vcpu);
+diff -ruN a/drivers/virt/geniezone/gzvm_vm.c b/drivers/virt/geniezone/gzvm_vm.c
+--- a/drivers/virt/geniezone/gzvm_vm.c
++++ b/drivers/virt/geniezone/gzvm_vm.c
+@@ -4,23 +4,32 @@
+  */
+ 
+ #include <linux/anon_inodes.h>
++#include <linux/debugfs.h>
+ #include <linux/file.h>
+ #include <linux/kdev_t.h>
+ #include <linux/mm.h>
+ #include <linux/module.h>
++#include <linux/sched/mm.h>
+ #include <linux/platform_device.h>
+ #include <linux/slab.h>
+-#include <linux/gzvm_drv.h>
++#include <linux/soc/mediatek/gzvm_drv.h>
++#include <trace/hooks/gzvm.h>
+ #include "gzvm_common.h"
+ 
+ static DEFINE_MUTEX(gzvm_list_lock);
+ static LIST_HEAD(gzvm_list);
+ 
+-u64 gzvm_gfn_to_hva_memslot(struct gzvm_memslot *memslot, u64 gfn)
++int gzvm_gfn_to_hva_memslot(struct gzvm_memslot *memslot, u64 gfn,
++			    u64 *hva_memslot)
+ {
+-	u64 offset = gfn - memslot->base_gfn;
++	u64 offset;
+ 
+-	return memslot->userspace_addr + offset * PAGE_SIZE;
++	if (gfn < memslot->base_gfn)
++		return -EINVAL;
++
++	offset = gfn - memslot->base_gfn;
++	*hva_memslot = memslot->userspace_addr + offset * PAGE_SIZE;
++	return 0;
+ }
+ 
+ /**
+@@ -79,7 +88,37 @@
+ 	}
+ 
+ 	free_pages_exact(region, buf_size);
+-	return 0;
++
++	if (gzvm->mem_alloc_mode == GZVM_DEMAND_PAGING)
++		return 0;
++	return gzvm_vm_populate_mem_region(gzvm, memslot->slot_id);
++}
++
++/**
++ * memory_region_pre_check() - Preliminary check for userspace memory region
++ * @gzvm: Pointer to struct gzvm.
++ * @mem: Input memory region from user.
++ *
++ * Return: true for check passed, false for invalid input.
++ */
++static bool
++memory_region_pre_check(struct gzvm *gzvm,
++			struct gzvm_userspace_memory_region *mem)
++{
++	if (mem->slot >= GZVM_MAX_MEM_REGION)
++		return false;
++
++	if (!PAGE_ALIGNED(mem->guest_phys_addr) ||
++	    !PAGE_ALIGNED(mem->memory_size))
++		return false;
++
++	if (mem->guest_phys_addr + mem->memory_size < mem->guest_phys_addr)
++		return false;
++
++	if ((mem->memory_size >> PAGE_SHIFT) > GZVM_MEM_MAX_NR_PAGES)
++		return false;
++
++	return true;
+ }
+ 
+ /**
+@@ -101,18 +140,31 @@
+ 	struct vm_area_struct *vma;
+ 	struct gzvm_memslot *memslot;
+ 	unsigned long size;
+-	__u32 slot;
+ 
+-	slot = mem->slot;
+-	if (slot >= GZVM_MAX_MEM_REGION)
+-		return -ENXIO;
+-	memslot = &gzvm->memslot[slot];
++	if (memory_region_pre_check(gzvm, mem) != true)
++		return -EINVAL;
++
++	memslot = &gzvm->memslot[mem->slot];
+ 
++	mmap_read_lock(gzvm->mm);
+ 	vma = vma_lookup(gzvm->mm, mem->userspace_addr);
+-	if (!vma)
++	if (!vma) {
++		mmap_read_unlock(gzvm->mm);
+ 		return -EFAULT;
++	}
+ 
+ 	size = vma->vm_end - vma->vm_start;
++	/*
++	 * The mmap read lock is only required while @vma is dereferenced to
++	 * read its extent above. Once @size has been captured @vma is no
++	 * longer dereferenced, so the lock is dropped here rather than being
++	 * held until the memslot->vma store below. That store keeps the
++	 * pointer purely for bookkeeping and it is never dereferenced anywhere
++	 * else in the driver, so extending the locked region to cover it would
++	 * protect nothing.
++	 */
++	mmap_read_unlock(gzvm->mm);
++
+ 	if (size != mem->memory_size)
+ 		return -EINVAL;
+ 
+@@ -134,6 +186,7 @@
+ int gzvm_irqchip_inject_irq(struct gzvm *gzvm, unsigned int vcpu_idx,
+ 			    u32 irq, bool level)
+ {
++	gzvm_vcpu_wakeup_all(gzvm);
+ 	return gzvm_arch_inject_irq(gzvm, vcpu_idx, irq, level);
+ }
+ 
+@@ -169,7 +222,7 @@
+ 
+ 	if (gzvm_dev->attr_addr != 0 && gzvm_dev->attr_size != 0) {
+ 		size_t attr_size = gzvm_dev->attr_size;
+-		void __user *attr_addr = (void __user *)gzvm_dev->attr_addr;
++		void __user *attr_addr = u64_to_user_ptr(gzvm_dev->attr_addr);
+ 
+ 		/* Size of device specific data should not be over a page. */
+ 		if (attr_size > PAGE_SIZE)
+@@ -197,6 +250,12 @@
+ 	return ret;
+ }
+ 
++static int gzvm_vm_internal_enable_cap(struct gzvm *gzvm,
++				       struct gzvm_enable_cap *cap)
++{
++	return gzvm_vm_internal_arch_enable_cap(gzvm, cap);
++}
++
+ static int gzvm_vm_ioctl_enable_cap(struct gzvm *gzvm,
+ 				    struct gzvm_enable_cap *cap,
+ 				    void __user *argp)
+@@ -212,6 +271,13 @@
+ 	void __user *argp = (void __user *)arg;
+ 	struct gzvm *gzvm = filp->private_data;
+ 
++	/*
++	 * Reject ioctls issued by a process other than the VM creator
++	 * (cf. KVM's kvm->mm check).
++	 */
++	if (gzvm->mm != current->mm)
++		return -EIO;
++
+ 	switch (ioctl) {
+ 	case GZVM_CHECK_EXTENSION: {
+ 		ret = gzvm_dev_ioctl_check_extension(gzvm, arg);
+@@ -224,10 +290,9 @@
+ 	case GZVM_SET_USER_MEMORY_REGION: {
+ 		struct gzvm_userspace_memory_region userspace_mem;
+ 
+-		if (copy_from_user(&userspace_mem, argp, sizeof(userspace_mem))) {
+-			ret = -EFAULT;
+-			goto out;
+-		}
++		if (copy_from_user(&userspace_mem, argp, sizeof(userspace_mem)))
++			return -EFAULT;
++
+ 		ret = gzvm_vm_ioctl_set_memory_region(gzvm, &userspace_mem);
+ 		break;
+ 	}
+@@ -292,7 +357,8 @@
+ 	return ret;
+ }
+ 
+-static void gzvm_destroy_ppage(struct gzvm *gzvm)
++/* Invoker of this function is responsible for locking */
++static void gzvm_destroy_all_ppage(struct gzvm *gzvm)
+ {
+ 	struct gzvm_pinned_page *ppage;
+ 	struct rb_node *node;
+@@ -307,6 +373,12 @@
+ 	}
+ }
+ 
++static int gzvm_destroy_vm_debugfs(struct gzvm *vm)
++{
++	debugfs_remove_recursive(vm->debug_dir);
++	return 0;
++}
++
+ static void gzvm_destroy_vm(struct gzvm *gzvm)
+ {
+ 	size_t allocated_size;
+@@ -316,30 +388,56 @@
+ 	mutex_lock(&gzvm->lock);
+ 
+ 	gzvm_vm_irqfd_release(gzvm);
++	gzvm_vm_ioeventfd_release(gzvm);
+ 	gzvm_destroy_vcpus(gzvm);
+-	gzvm_arch_destroy_vm(gzvm->vm_id);
++	gzvm_arch_destroy_vm(gzvm->vm_id, gzvm->gzvm_drv->destroy_batch_pages);
+ 
+ 	mutex_lock(&gzvm_list_lock);
+ 	list_del(&gzvm->vm_list);
+ 	mutex_unlock(&gzvm_list_lock);
+ 
+ 	if (gzvm->demand_page_buffer) {
+-		allocated_size = GZVM_BLOCK_BASED_DEMAND_PAGE_SIZE / PAGE_SIZE * sizeof(u64);
++		allocated_size = GZVM_BLOCK_BASED_DEMAND_PAGE_SIZE / PAGE_SIZE *
++				 sizeof(u64);
+ 		free_pages_exact(gzvm->demand_page_buffer, allocated_size);
+ 	}
+ 
+ 	mutex_unlock(&gzvm->lock);
+ 
+-	gzvm_destroy_ppage(gzvm);
++	trace_android_vh_gzvm_destroy_vm_post_process(gzvm);
++
++	/* No need to lock here becauese it's single-threaded execution */
++	gzvm_destroy_all_ppage(gzvm);
+ 
++	gzvm_destroy_vm_debugfs(gzvm);
++
++	mmdrop(gzvm->mm);
+ 	kfree(gzvm);
+ }
+ 
++static void __gzvm_vm_put(struct kref *kref)
++{
++	struct gzvm *gzvm = container_of(kref, struct gzvm, kref);
++
++	gzvm_destroy_vm(gzvm);
++}
++
++void gzvm_vm_put(struct gzvm *gzvm)
++{
++	kref_put(&gzvm->kref, __gzvm_vm_put);
++}
++
++void gzvm_vm_get(struct gzvm *gzvm)
++{
++	kref_get(&gzvm->kref);
++}
++
+ static int gzvm_vm_release(struct inode *inode, struct file *filp)
+ {
+ 	struct gzvm *gzvm = filp->private_data;
+ 
+-	gzvm_destroy_vm(gzvm);
++	gzvm_vm_put(gzvm);
++
+ 	return 0;
+ }
+ 
+@@ -350,18 +448,20 @@
+ };
+ 
+ /**
+- * setup_vm_demand_paging - Query hypervisor suitable demand page size and set
++ * setup_vm_demand_paging() - Query hypervisor suitable demand page size and set
+  * @vm: gzvm instance for setting up demand page size
+  *
+  * Return: void
+  */
+ static void setup_vm_demand_paging(struct gzvm *vm)
+ {
+-	u32 buf_size = GZVM_BLOCK_BASED_DEMAND_PAGE_SIZE / PAGE_SIZE * sizeof(u64);
+ 	struct gzvm_enable_cap cap = {0};
++	u32 buf_size;
+ 	void *buffer;
+ 	int ret;
+ 
++	buf_size = (GZVM_BLOCK_BASED_DEMAND_PAGE_SIZE / PAGE_SIZE) *
++		    sizeof(pte_t);
+ 	mutex_init(&vm->demand_paging_lock);
+ 	buffer = alloc_pages_exact(buf_size, GFP_KERNEL);
+ 	if (!buffer) {
+@@ -377,7 +477,7 @@
+ 	/* demand_page_buffer is freed when destroy VM */
+ 	vm->demand_page_buffer = buffer;
+ 
+-	ret = gzvm_vm_ioctl_enable_cap(vm, &cap, NULL);
++	ret = gzvm_vm_internal_enable_cap(vm, &cap);
+ 	if (ret == 0) {
+ 		vm->demand_page_gran = GZVM_BLOCK_BASED_DEMAND_PAGE_SIZE;
+ 		/* freed when destroy vm */
+@@ -389,7 +489,141 @@
+ 	}
+ }
+ 
+-static struct gzvm *gzvm_create_vm(unsigned long vm_type)
++/**
++ * hyp_mem_read() - Get size of hypervisor-allocated memory and stage 2 table
++ * @file: Pointer to struct file
++ * @buf: User space buffer for storing the return value
++ * @len: Size of @buf, in bytes
++ * @offset: Pointer to loff_t
++ *
++ * Return: Size of hypervisor-allocated memory and stage 2 table, in bytes
++ */
++static ssize_t hyp_mem_read(struct file *file, char __user *buf, size_t len,
++			    loff_t *offset)
++{
++	char tmp_buffer[GZVM_MAX_DEBUGFS_VALUE_SIZE] = {0};
++	struct gzvm *vm = file->private_data;
++	int ret;
++
++	if (*offset == 0) {
++		ret = gzvm_arch_get_statistics(vm);
++		if (ret)
++			return ret;
++		snprintf(tmp_buffer, sizeof(tmp_buffer), "%llu\n",
++			 vm->stat.protected_hyp_mem);
++		if (copy_to_user(buf, tmp_buffer, sizeof(tmp_buffer)))
++			return -EFAULT;
++		*offset += sizeof(tmp_buffer);
++		return sizeof(tmp_buffer);
++	}
++	return 0;
++}
++
++/**
++ * shared_mem_read() - Get size of memory shared between host and guest
++ * @file: Pointer to struct file
++ * @buf: User space buffer for storing the return value
++ * @len: Size of @buf, in bytes
++ * @offset: Pointer to loff_t
++ *
++ * Return: Size of memory shared between host and guest, in bytes
++ */
++static ssize_t shared_mem_read(struct file *file, char __user *buf, size_t len,
++			       loff_t *offset)
++{
++	char tmp_buffer[GZVM_MAX_DEBUGFS_VALUE_SIZE] = {0};
++	struct gzvm *vm = file->private_data;
++	int ret;
++
++	if (*offset == 0) {
++		ret = gzvm_arch_get_statistics(vm);
++		if (ret)
++			return ret;
++		snprintf(tmp_buffer, sizeof(tmp_buffer), "%llu\n",
++			 vm->stat.protected_shared_mem);
++		if (copy_to_user(buf, tmp_buffer, sizeof(tmp_buffer)))
++			return -EFAULT;
++		*offset += sizeof(tmp_buffer);
++		return sizeof(tmp_buffer);
++	}
++	return 0;
++}
++
++static const struct file_operations hyp_mem_fops = {
++	.open = simple_open,
++	.read = hyp_mem_read,
++	.llseek = no_llseek,
++};
++
++static const struct file_operations shared_mem_fops = {
++	.open = simple_open,
++	.read = shared_mem_read,
++	.llseek = no_llseek,
++};
++
++static int gzvm_create_vm_debugfs(struct gzvm *vm)
++{
++	struct dentry *dent;
++	char dir_name[GZVM_MAX_DEBUGFS_DIR_NAME_SIZE];
++
++	if (!vm->gzvm_drv->gzvm_debugfs_dir) {
++		pr_warn("VM debugfs directory is not exist\n");
++		return -EFAULT;
++	}
++
++	if (vm->debug_dir) {
++		pr_warn("VM debugfs directory is duplicated\n");
++		return 0;
++	}
++
++	snprintf(dir_name, sizeof(dir_name), "%d-%d", task_pid_nr(current), vm->vm_id);
++
++	dent = debugfs_lookup(dir_name, vm->gzvm_drv->gzvm_debugfs_dir);
++	if (dent) {
++		pr_warn("Debugfs directory is duplicated\n");
++		dput(dent);
++		return 0;
++	}
++	dent = debugfs_create_dir(dir_name, vm->gzvm_drv->gzvm_debugfs_dir);
++	vm->debug_dir = dent;
++
++	debugfs_create_file("protected_shared_mem", 0444, dent, vm, &shared_mem_fops);
++	debugfs_create_file("protected_hyp_mem", 0444, dent, vm, &hyp_mem_fops);
++
++	return 0;
++}
++
++static int setup_mem_alloc_mode(struct gzvm *vm)
++{
++	int ret;
++	struct gzvm_enable_cap cap = {0};
++
++	cap.cap = GZVM_CAP_ENABLE_DEMAND_PAGING;
++
++	ret = gzvm_vm_internal_enable_cap(vm, &cap);
++	if (!ret) {
++		vm->mem_alloc_mode = GZVM_DEMAND_PAGING;
++		setup_vm_demand_paging(vm);
++	} else {
++		vm->mem_alloc_mode = GZVM_FULLY_POPULATED;
++	}
++
++	return 0;
++}
++
++static int enable_idle_support(struct gzvm *vm)
++{
++	int ret;
++	struct gzvm_enable_cap cap = {0};
++
++	cap.cap = GZVM_CAP_ENABLE_IDLE;
++	ret = gzvm_vm_internal_enable_cap(vm, &cap);
++	if (ret)
++		pr_info("Hypervisor doesn't support idle\n");
++	return ret;
++}
++
++static struct gzvm *gzvm_create_vm(struct gzvm_driver *drv, unsigned long vm_type)
+ {
+ 	int ret;
+ 	struct gzvm *gzvm;
+@@ -404,11 +638,14 @@
+ 		return ERR_PTR(ret);
+ 	}
+ 
++	gzvm->gzvm_drv = drv;
+ 	gzvm->vm_id = ret;
+-	gzvm->mm = current->mm;
+ 	mutex_init(&gzvm->lock);
++	mutex_init(&gzvm->mem_lock);
+ 	gzvm->pinned_pages = RB_ROOT;
+ 
++	kref_init(&gzvm->kref);
++
+ 	ret = gzvm_vm_irqfd_init(gzvm);
+ 	if (ret) {
+ 		pr_err("Failed to initialize irqfd\n");
+@@ -423,46 +660,58 @@
+ 		return ERR_PTR(ret);
+ 	}
+ 
+-	setup_vm_demand_paging(gzvm);
++	/*
++	 * Pin the creator's mm_struct for the VM's lifetime (cf. KVM's
++	 * mmgrab(kvm->mm)). Taken here, after the last failure path that
++	 * would free gzvm, so it is balanced by the single mmdrop() in
++	 * gzvm_destroy_vm().
++	 */
++	mmgrab(current->mm);
++	gzvm->mm = current->mm;
++
++	setup_mem_alloc_mode(gzvm);
+ 
+ 	mutex_lock(&gzvm_list_lock);
+ 	list_add(&gzvm->vm_list, &gzvm_list);
+ 	mutex_unlock(&gzvm_list_lock);
+ 
++	ret = gzvm_create_vm_debugfs(gzvm);
++	if (ret)
++		pr_debug("Failed to create debugfs for VM-%u\n", gzvm->vm_id);
++
+ 	pr_debug("VM-%u is created\n", gzvm->vm_id);
+ 
++	enable_idle_support(gzvm);
++
+ 	return gzvm;
+ }
+ 
+ /**
+  * gzvm_dev_ioctl_create_vm - Create vm fd
+- * @vm_type: VM type. Only supports Linux VM now.
++ * @vm_type: VM type. Only supports Linux VM now
++ * @drv: GenieZone driver info to be stored in struct gzvm for future usage
+  *
+  * Return: fd of vm, negative if error
+  */
+-int gzvm_dev_ioctl_create_vm(unsigned long vm_type)
++int gzvm_dev_ioctl_create_vm(struct gzvm_driver *drv, unsigned long vm_type)
+ {
+ 	struct gzvm *gzvm;
++	int ret;
+ 
+-	gzvm = gzvm_create_vm(vm_type);
++	gzvm = gzvm_create_vm(drv, vm_type);
+ 	if (IS_ERR(gzvm))
+ 		return PTR_ERR(gzvm);
+ 
+-	return anon_inode_getfd("gzvm-vm", &gzvm_vm_fops, gzvm,
++	ret = anon_inode_getfd("gzvm-vm", &gzvm_vm_fops, gzvm,
+ 			       O_RDWR | O_CLOEXEC);
+-}
++	/*
++	 * gzvm_create_vm() initializes the VM's kref to one. If
++	 * anon_inode_getfd() succeeds, gzvm_vm_release() drops this initial
++	 * reference when the VM file is released. On failure, the release
++	 * callback will not run, so drop the reference here.
++	 */
++	if (ret < 0)
++		gzvm_vm_put(gzvm);
+ 
+-void gzvm_destroy_all_vms(void)
+-{
+-	struct gzvm *gzvm, *tmp;
+-
+-	mutex_lock(&gzvm_list_lock);
+-	if (list_empty(&gzvm_list))
+-		goto out;
+-
+-	list_for_each_entry_safe(gzvm, tmp, &gzvm_list, vm_list)
+-		gzvm_destroy_vm(gzvm);
+-
+-out:
+-	mutex_unlock(&gzvm_list_lock);
++	return ret;
+ }
+diff -ruN a/include/linux/soc/mediatek/gzvm_drv.h b/include/linux/soc/mediatek/gzvm_drv.h
+--- a/include/linux/soc/mediatek/gzvm_drv.h
++++ b/include/linux/soc/mediatek/gzvm_drv.h
+@@ -0,0 +1,309 @@
++/* SPDX-License-Identifier: GPL-2.0 */
++/*
++ * Copyright (c) 2023 MediaTek Inc.
++ */
++
++#ifndef __GZVM_DRV_H__
++#define __GZVM_DRV_H__
++
++#include <linux/eventfd.h>
++#include <linux/list.h>
++#include <linux/mm.h>
++#include <linux/mutex.h>
++#include <linux/gzvm.h>
++#include <linux/srcu.h>
++#include <linux/rbtree.h>
++#include <linux/kref.h>
++
++/* GZVM version encode */
++#define GZVM_DRV_MAJOR_VERSION		16
++#define GZVM_DRV_MINOR_VERSION		0
++
++struct gzvm_version {
++	u32 major;
++	u32 minor;
++	u64 sub;	/* currently, used by hypervisor */
++};
++
++struct gzvm_driver {
++	struct gzvm_version hyp_version;
++	struct gzvm_version drv_version;
++
++	struct kobject *sysfs_root_dir;
++	u32 demand_paging_batch_pages;
++	u32 destroy_batch_pages;
++
++	struct dentry *gzvm_debugfs_dir;
++};
++
++/*
++ * For the normal physical address, the highest 12 bits should be zero, so we
++ * can mask bit 62 ~ bit 52 to indicate the error physical address
++ */
++#define GZVM_PA_ERR_BAD (0x7ffULL << 52)
++
++#define GZVM_VCPU_MMAP_SIZE  PAGE_SIZE
++#define INVALID_VM_ID   0xffff
++
++/*
++ * These are the definitions of APIs between GenieZone hypervisor and driver,
++ * there's no need to be visible to uapi. Furthermore, we need GenieZone
++ * specific error code in order to map to Linux errno
++ */
++#define NO_ERROR                (0)
++#define ERR_NO_MEMORY           (-5)
++#define ERR_INVALID_ARGS        (-8)
++#define ERR_NOT_SUPPORTED       (-24)
++#define ERR_NOT_IMPLEMENTED     (-27)
++#define ERR_BUSY                (-33)
++#define ERR_FAULT               (-40)
++#define GZVM_IRQFD_RESAMPLE_IRQ_SOURCE_ID       1
++
++/*
++ * The following data structures are for data transferring between driver and
++ * hypervisor, and they're aligned with hypervisor definitions
++ */
++#define GZVM_MAX_VCPUS		 8
++#define GZVM_MAX_MEM_REGION	10
++
++#define GZVM_VCPU_RUN_MAP_SIZE			(PAGE_SIZE * 2)
++
++#define GZVM_BLOCK_BASED_DEMAND_PAGE_SIZE	(PMD_SIZE) /* 2MB */
++#define GZVM_DRV_DEMAND_PAGING_BATCH_PAGES	\
++	(GZVM_BLOCK_BASED_DEMAND_PAGE_SIZE / PAGE_SIZE)
++#define GZVM_DRV_DESTROY_PAGING_BATCH_PAGES	(128)
++
++#define GZVM_MAX_DEBUGFS_DIR_NAME_SIZE  20
++#define GZVM_MAX_DEBUGFS_VALUE_SIZE	20
++
++enum gzvm_demand_paging_mode {
++	GZVM_FULLY_POPULATED = 0,
++	GZVM_DEMAND_PAGING = 1,
++};
++
++/**
++ * struct mem_region_addr_range: identical to ffa memory constituent
++ * @address: the base IPA of the constituent memory region, aligned to 4 kiB
++ * @pg_cnt: the number of 4 kiB pages in the constituent memory region
++ * @reserved: reserved for 64bit alignment
++ */
++struct mem_region_addr_range {
++	__u64 address;
++	__u32 pg_cnt;
++	__u32 reserved;
++};
++
++struct gzvm_memory_region_ranges {
++	__u32 slot;
++	__u32 constituent_cnt;
++	__u64 total_pages;
++	__u64 gpa;
++	struct mem_region_addr_range constituents[];
++};
++
++/*
++ * A reasonable and large enough limit for the maximum number of pages a
++ * guest can use.
++ */
++#define GZVM_MEM_MAX_NR_PAGES		((1UL << 31) - 1)
++
++/**
++ * struct gzvm_memslot: VM's memory slot descriptor
++ * @base_gfn: begin of guest page frame
++ * @npages: number of pages this slot covers
++ * @userspace_addr: corresponding userspace va
++ * @vma: vma related to this userspace addr
++ * @flags: define the usage of memory region. Ex. guest memory or
++ * firmware protection
++ * @slot_id: the id is used to identify the memory slot
++ */
++struct gzvm_memslot {
++	u64 base_gfn;
++	unsigned long npages;
++	unsigned long userspace_addr;
++	struct vm_area_struct *vma;
++	u32 flags;
++	u32 slot_id;
++};
++
++struct gzvm_vcpu {
++	struct gzvm *gzvm;
++	int vcpuid;
++	/* lock of vcpu*/
++	struct mutex lock;
++	struct gzvm_vcpu_run *run;
++	struct gzvm_vcpu_hwstate *hwstate;
++	struct hrtimer gzvm_vtimer;
++	struct {
++		u32 vtimer_irq;
++		u32 virtio_irq;
++	} idle_events;
++	struct rcuwait wait;
++};
++
++struct gzvm_pinned_page {
++	struct rb_node node;
++	struct page *page;
++	u64 ipa;
++};
++
++struct gzvm_vm_stat {
++	u64 protected_hyp_mem;
++	u64 protected_shared_mem;
++};
++
++/**
++ * struct gzvm: the following data structures are for data transferring between
++ * driver and hypervisor, and they're aligned with hypervisor definitions.
++ * @gzvm_drv: the data structure is used to keep driver's information
++ * @vcpus: VM's cpu descriptors
++ * @mm: userspace tied to this vm
++ * @memslot: VM's memory slot descriptor
++ * @lock: lock for list_add
++ * @irqfds: the data structure is used to keep irqfds's information
++ * @ioevents: list head for ioevents
++ * @ioevent_lock: lock for ioevent list
++ * @vm_list: list head for vm list
++ * @vm_id: vm id
++ * @irq_ack_notifier_list: list head for irq ack notifier
++ * @irq_srcu: structure data for SRCU(sleepable rcu)
++ * @irq_lock: lock for irq injection
++ * @pinned_pages: use rb-tree to record pin/unpin page
++ * @mem_lock: lock for memory operations
++ * @mem_alloc_mode: memory allocation mode - fully allocated or demand paging
++ * @demand_page_gran: demand page granularity: how much memory we allocate for
++ * VM in a single page fault
++ * @demand_page_buffer: the mailbox for transferring large portion pages
++ * @demand_paging_lock: lock for preventing multiple cpu using the same demand
++ * page mailbox at the same time
++ * @stat: information for VM memory statistics
++ * @debug_dir: debugfs directory node for VM memory statistics
++ * @kref: reference counter between vm and vcpu when destroy happened
++ */
++struct gzvm {
++	struct gzvm_driver *gzvm_drv;
++	struct gzvm_vcpu *vcpus[GZVM_MAX_VCPUS];
++	struct mm_struct *mm;
++	struct gzvm_memslot memslot[GZVM_MAX_MEM_REGION];
++	struct mutex lock;
++
++	struct {
++		spinlock_t        lock;
++		struct list_head  items;
++		struct list_head  resampler_list;
++		struct mutex      resampler_lock;
++	} irqfds;
++
++	struct list_head ioevents;
++	struct mutex ioevent_lock;
++
++	struct list_head vm_list;
++	u16 vm_id;
++
++	struct hlist_head irq_ack_notifier_list;
++	struct srcu_struct irq_srcu;
++	struct mutex irq_lock;
++	u32 mem_alloc_mode;
++
++	struct rb_root pinned_pages;
++	struct mutex mem_lock;
++
++	u32 demand_page_gran;
++	u64 *demand_page_buffer;
++	struct mutex  demand_paging_lock;
++
++	struct gzvm_vm_stat stat;
++	struct dentry *debug_dir;
++	struct kref kref;
++};
++
++long gzvm_dev_ioctl_check_extension(struct gzvm *gzvm, unsigned long args);
++int gzvm_dev_ioctl_create_vm(struct gzvm_driver *drv, unsigned long vm_type);
++
++int gzvm_err_to_errno(unsigned long err);
++
++void gzvm_destroy_all_vms(void);
++
++void gzvm_destroy_vcpus(struct gzvm *gzvm);
++
++/* arch-dependant functions */
++int gzvm_arch_probe(struct gzvm_version drv_version,
++		    struct gzvm_version *hyp_version);
++int gzvm_arch_query_hyp_batch_pages(struct gzvm_enable_cap *cap,
++				    void __user *argp);
++int gzvm_arch_query_destroy_batch_pages(struct gzvm_enable_cap *cap,
++					void __user *argp);
++
++int gzvm_arch_set_memregion(u16 vm_id, size_t buf_size,
++			    phys_addr_t region);
++int gzvm_arch_check_extension(struct gzvm *gzvm, __u64 cap, void __user *argp);
++int gzvm_arch_create_vm(unsigned long vm_type);
++int gzvm_arch_destroy_vm(u16 vm_id, u64 destroy_page_gran);
++int gzvm_arch_map_guest(u16 vm_id, int memslot_id, u64 pfn, u64 gfn,
++			u64 nr_pages);
++int gzvm_arch_map_guest_block(u16 vm_id, int memslot_id, u64 gfn, u64 nr_pages);
++int gzvm_arch_get_statistics(struct gzvm *gzvm);
++int gzvm_vm_internal_arch_enable_cap(struct gzvm *gzvm,
++				     struct gzvm_enable_cap *cap);
++int gzvm_vm_ioctl_arch_enable_cap(struct gzvm *gzvm,
++				  struct gzvm_enable_cap *cap,
++				  void __user *argp);
++
++int gzvm_gfn_to_hva_memslot(struct gzvm_memslot *memslot, u64 gfn,
++			    u64 *hva_memslot);
++int gzvm_vm_populate_mem_region(struct gzvm *gzvm, int slot_id);
++int gzvm_vm_allocate_guest_page(struct gzvm *gzvm, struct gzvm_memslot *slot,
++				u64 gfn, u64 *pfn);
++
++int gzvm_vm_ioctl_create_vcpu(struct gzvm *gzvm, u32 cpuid);
++int gzvm_arch_vcpu_update_one_reg(struct gzvm_vcpu *vcpu, __u64 reg_id,
++				  bool is_write, __u64 *data);
++int gzvm_arch_drv_init(void);
++int gzvm_arch_create_vcpu(u16 vm_id, int vcpuid, void *run);
++int gzvm_arch_vcpu_run(struct gzvm_vcpu *vcpu, __u64 *exit_reason);
++int gzvm_arch_destroy_vcpu(u16 vm_id, int vcpuid);
++int gzvm_arch_inform_exit(u16 vm_id);
++
++u64 gzvm_vcpu_arch_get_timer_delay_ns(struct gzvm_vcpu *vcpu);
++
++void gzvm_vtimer_set(struct gzvm_vcpu *vcpu, u64 ns);
++void gzvm_vtimer_release(struct gzvm_vcpu *vcpu);
++
++int gzvm_find_memslot(struct gzvm *vm, u64 gpa);
++int gzvm_handle_page_fault(struct gzvm_vcpu *vcpu);
++bool gzvm_handle_guest_exception(struct gzvm_vcpu *vcpu);
++int gzvm_handle_relinquish(struct gzvm_vcpu *vcpu, phys_addr_t ipa);
++bool gzvm_handle_guest_hvc(struct gzvm_vcpu *vcpu);
++bool gzvm_arch_handle_guest_hvc(struct gzvm_vcpu *vcpu);
++int gzvm_handle_guest_idle(struct gzvm_vcpu *vcpu);
++void gzvm_handle_guest_ipi(struct gzvm_vcpu *vcpu);
++void gzvm_vcpu_wakeup_all(struct gzvm *gzvm);
++
++int gzvm_arch_create_device(u16 vm_id, struct gzvm_create_device *gzvm_dev);
++int gzvm_arch_inject_irq(struct gzvm *gzvm, unsigned int vcpu_idx,
++			 u32 irq, bool level);
++
++void gzvm_notify_acked_irq(struct gzvm *gzvm, unsigned int gsi);
++int gzvm_irqfd(struct gzvm *gzvm, struct gzvm_irqfd *args);
++int gzvm_drv_irqfd_init(void);
++void gzvm_drv_irqfd_exit(void);
++int gzvm_vm_irqfd_init(struct gzvm *gzvm);
++void gzvm_vm_irqfd_release(struct gzvm *gzvm);
++
++int gzvm_arch_memregion_purpose(struct gzvm *gzvm,
++				struct gzvm_userspace_memory_region *mem);
++int gzvm_arch_set_dtb_config(struct gzvm *gzvm, struct gzvm_dtb_config *args);
++
++int gzvm_init_ioeventfd(struct gzvm *gzvm);
++void gzvm_vm_ioeventfd_release(struct gzvm *gzvm);
++int gzvm_ioeventfd(struct gzvm *gzvm, struct gzvm_ioeventfd *args);
++bool gzvm_ioevent_write(struct gzvm_vcpu *vcpu, __u64 addr, int len,
++			const void *val);
++void eventfd_ctx_do_read(struct eventfd_ctx *ctx, __u64 *cnt);
++struct vm_area_struct *vma_lookup(struct mm_struct *mm, unsigned long addr);
++void add_wait_queue_priority(struct wait_queue_head *wq_head,
++			     struct wait_queue_entry *wq_entry);
++void gzvm_vm_put(struct gzvm *gzvm);
++void gzvm_vm_get(struct gzvm *gzvm);
++
++#endif /* __GZVM_DRV_H__ */
+diff -ruN a/include/trace/events/geniezone.h b/include/trace/events/geniezone.h
+--- a/include/trace/events/geniezone.h
++++ b/include/trace/events/geniezone.h
+@@ -0,0 +1,84 @@
++/* SPDX-License-Identifier: GPL-2.0 */
++/*
++ * Copyright (c) 2023 MediaTek Inc.
++ */
++
++#undef TRACE_SYSTEM
++#define TRACE_SYSTEM geniezone
++
++#define _TRACE_GENIEZONE_H
++
++#include <linux/gzvm.h>
++#include <linux/tracepoint.h>
++
++#define GZVM_EXIT_REASONS \
++EM(UNKNOWN)\
++EM(MMIO)\
++EM(HYPERCALL)\
++EM(IRQ)\
++EM(EXCEPTION)\
++EM(DEBUG)\
++EM(FAIL_ENTRY)\
++EM(INTERNAL_ERROR)\
++EM(SYSTEM_EVENT)\
++EM(SHUTDOWN)\
++EMe(GZ)
++
++#undef EM
++#undef EMe
++#define EM(a) TRACE_DEFINE_ENUM(GZVM_EXIT_##a);
++#define EMe(a) TRACE_DEFINE_ENUM(GZVM_EXIT_##a);
++
++GZVM_EXIT_REASONS
++
++#undef EM
++#undef EMe
++
++#define EM(a)       { GZVM_EXIT_##a, #a },
++#define EMe(a)      { GZVM_EXIT_##a, #a }
++
++TRACE_EVENT(mtk_hypcall_enter,
++	    TP_PROTO(unsigned long id),
++
++	    TP_ARGS(id),
++
++	    TP_STRUCT__entry(__field(unsigned long, id)),
++
++	    TP_fast_assign(__entry->id = id;),
++
++	    TP_printk("id=0x%lx", __entry->id)
++);
++
++TRACE_EVENT(mtk_hypcall_leave,
++	    TP_PROTO(unsigned long id, unsigned long invalid),
++
++	    TP_ARGS(id, invalid),
++
++	    TP_STRUCT__entry(__field(unsigned long, id)
++			     __field(unsigned long, invalid)
++	    ),
++
++	    TP_fast_assign(__entry->id = id;
++			   __entry->invalid = invalid;
++	    ),
++
++	    TP_printk("id=0x%lx invalid=%lu", __entry->id, __entry->invalid)
++);
++
++TRACE_EVENT(mtk_vcpu_exit,
++	    TP_PROTO(unsigned long exit_reason),
++
++	    TP_ARGS(exit_reason),
++
++	    TP_STRUCT__entry(__field(unsigned long, exit_reason)),
++
++	    TP_fast_assign(__entry->exit_reason = exit_reason;),
++
++	    TP_printk("vcpu exit_reason=%s(0x%lx)",
++		      __print_symbolic(__entry->exit_reason, GZVM_EXIT_REASONS),
++		      __entry->exit_reason)
++
++);
++
++/* This part must be outside protection */
++#include <trace/define_trace.h>
+diff -ruN a/include/trace/hooks/gzvm.h b/include/trace/hooks/gzvm.h
+--- a/include/trace/hooks/gzvm.h
++++ b/include/trace/hooks/gzvm.h
+@@ -0,0 +1,19 @@
++/* SPDX-License-Identifier: GPL-2.0 */
++/*
++ * PadVM: the backported android15-6.6 GenieZone driver calls four Android
++ * vendor hooks that do not exist in this 6.1 kernel. Nothing registers them
++ * here, so provide no-op stubs instead of adding new exported tracepoints.
++ */
++#ifndef _TRACE_HOOK_GZVM_H
++#define _TRACE_HOOK_GZVM_H
++#include <linux/types.h>
++struct gzvm_vcpu;
++struct gzvm;
++
++static inline void trace_android_vh_gzvm_vcpu_exit_reason(struct gzvm_vcpu *vcpu, bool *userspace) {}
++static inline void trace_android_vh_gzvm_handle_demand_page_pre(struct gzvm *vm, int memslot_id,
++								u64 pfn, u64 gfn, u32 nr_entries) {}
++static inline void trace_android_vh_gzvm_handle_demand_page_post(struct gzvm *vm, int memslot_id,
++								 u64 pfn, u64 gfn, u32 nr_entries) {}
++static inline void trace_android_vh_gzvm_destroy_vm_post_process(struct gzvm *vm) {}
++#endif /* _TRACE_HOOK_GZVM_H */
+diff -ruN a/include/uapi/linux/gzvm.h b/include/uapi/linux/gzvm.h
+--- a/include/uapi/linux/gzvm.h
++++ b/include/uapi/linux/gzvm.h
+@@ -20,6 +20,10 @@
+ #define GZVM_CAP_PROTECTED_VM	0xffbadab1
+ /* query hypervisor supported block-based demand page */
+ #define GZVM_CAP_BLOCK_BASED_DEMAND_PAGING	0x9201
++#define GZVM_CAP_ENABLE_DEMAND_PAGING	0x9202
++#define GZVM_CAP_ENABLE_IDLE		0x9203
++#define GZVM_CAP_QUERY_HYP_BATCH_PAGES	0x9204
++#define GZVM_CAP_QUERY_DESTROY_BATCH_PAGES	0x9205
+ 
+ /* sub-commands put in args[0] for GZVM_CAP_PROTECTED_VM */
+ #define GZVM_CAP_PVM_SET_PVMFW_GPA		0
+@@ -31,29 +35,25 @@
+  * Architecture specific registers are to be defined and ORed with
+  * the arch identifier.
+  */
+-#define GZVM_REG_ARCH_ARM64	0x6000000000000000ULL
+-#define GZVM_REG_ARCH_MASK	0xff00000000000000ULL
+-
++#define GZVM_REG_ARCH_ARM64	FIELD_PREP(GENMASK_ULL(63, 56), 0x60)
++#define GZVM_REG_ARCH_MASK	FIELD_PREP(GENMASK_ULL(63, 56), 0xff)
+ /*
+  * Reg size = BIT((reg.id & GZVM_REG_SIZE_MASK) >> GZVM_REG_SIZE_SHIFT) bytes
+  */
+ #define GZVM_REG_SIZE_SHIFT	52
+-#define GZVM_REG_SIZE_MASK	0x00f0000000000000ULL
++#define GZVM_REG_SIZE_MASK	FIELD_PREP(GENMASK_ULL(63, 48), 0x00f0)
++
++#define GZVM_REG_SIZE_U8	FIELD_PREP(GENMASK_ULL(63, 48), 0x0000)
++#define GZVM_REG_SIZE_U16	FIELD_PREP(GENMASK_ULL(63, 48), 0x0010)
++#define GZVM_REG_SIZE_U32	FIELD_PREP(GENMASK_ULL(63, 48), 0x0020)
++#define GZVM_REG_SIZE_U64	FIELD_PREP(GENMASK_ULL(63, 48), 0x0030)
++#define GZVM_REG_SIZE_U128	FIELD_PREP(GENMASK_ULL(63, 48), 0x0040)
++#define GZVM_REG_SIZE_U256	FIELD_PREP(GENMASK_ULL(63, 48), 0x0050)
++#define GZVM_REG_SIZE_U512	FIELD_PREP(GENMASK_ULL(63, 48), 0x0060)
++#define GZVM_REG_SIZE_U1024	FIELD_PREP(GENMASK_ULL(63, 48), 0x0070)
++#define GZVM_REG_SIZE_U2048	FIELD_PREP(GENMASK_ULL(63, 48), 0x0080)
+ 
+-#define GZVM_REG_SIZE_U8	0x0000000000000000ULL
+-#define GZVM_REG_SIZE_U16	0x0010000000000000ULL
+-#define GZVM_REG_SIZE_U32	0x0020000000000000ULL
+-#define GZVM_REG_SIZE_U64	0x0030000000000000ULL
+-#define GZVM_REG_SIZE_U128	0x0040000000000000ULL
+-#define GZVM_REG_SIZE_U256	0x0050000000000000ULL
+-#define GZVM_REG_SIZE_U512	0x0060000000000000ULL
+-#define GZVM_REG_SIZE_U1024	0x0070000000000000ULL
+-#define GZVM_REG_SIZE_U2048	0x0080000000000000ULL
+-
+-/* Register type definitions */
+-#define GZVM_REG_TYPE_SHIFT	16
+-/* Register type: general purpose */
+-#define GZVM_REG_TYPE_GENERAL	(0x10 << GZVM_REG_TYPE_SHIFT)
++#define GZVM_REG_TYPE_GENERAL2	FIELD_PREP(GENMASK(23, 16), 0x10)
+ 
+ /* GZVM ioctls */
+ #define GZVM_IOC_MAGIC			0x92	/* gz */
+@@ -87,14 +87,19 @@
+  */
+ #define GZVM_CREATE_VCPU           _IO(GZVM_IOC_MAGIC,   0x41)
+ 
+-/* for GZVM_SET_USER_MEMORY_REGION */
++/**
++ * struct gzvm_userspace_memory_region: gzvm userspace memory region descriptor
++ * @slot: memory slot
++ * @flags: describe the usage of userspace memory region
++ * @guest_phys_addr: guest vm's physical address
++ * @memory_size: memory size in bytes
++ * @userspace_addr: start of the userspace allocated memory
++ */
+ struct gzvm_userspace_memory_region {
+ 	__u32 slot;
+ 	__u32 flags;
+ 	__u64 guest_phys_addr;
+-	/* bytes */
+ 	__u64 memory_size;
+-	/* start of the userspace allocated memory */
+ 	__u64 userspace_addr;
+ };
+ 
+@@ -185,6 +190,8 @@
+ 	GZVM_EXIT_SYSTEM_EVENT = 0x92920008,
+ 	GZVM_EXIT_SHUTDOWN = 0x92920009,
+ 	GZVM_EXIT_GZ = 0x9292000a,
++	GZVM_EXIT_IDLE = 0x9292000b,
++	GZVM_EXIT_IPI = 0x9292000d,
+ };
+ 
+ /* exception definitions of GZVM_EXIT_EXCEPTION */
+@@ -195,49 +202,28 @@
+ 
+ /* hypercall definitions of GZVM_EXIT_HYPERCALL */
+ enum {
++	GZVM_HVC_PTP = 0x86000001,
+ 	GZVM_HVC_MEM_RELINQUISH = 0xc6000009,
+ };
+ 
+ /**
+  * struct gzvm_vcpu_run: Same purpose as kvm_run, this struct is
+- *			shared between userspace, kernel and
+- *			GenieZone hypervisor
++ *			 shared between userspace, kernel and
++ *			 GenieZone hypervisor
+  * @exit_reason: The reason why gzvm_vcpu_run has stopped running the vCPU
+  * @immediate_exit: Polled when the vcpu is scheduled.
+  *                  If set, immediately returns -EINTR
+  * @padding1: Reserved for future-proof and must be zero filled
+  * @mmio: The nested struct in anonymous union. Handle mmio in host side
+- * @phys_addr: The address guest tries to access
+- * @data: The value to be written (is_write is 1) or
+- *        be filled by user for reads (is_write is 0)
+- * @size: The size of written data.
+- *        Only the first `size` bytes of `data` are handled
+- * @reg_nr: The register number where the data is stored
+- * @is_write: 1 for VM to perform a write or 0 for VM to perform a read
+  * @fail_entry: The nested struct in anonymous union.
+  *              Handle invalid entry address at the first run
+- * @hardware_entry_failure_reason: The reason codes about hardware entry failure
+- * @cpu: The current processor number via smp_processor_id()
+  * @exception: The nested struct in anonymous union.
+  *             Handle exception occurred in VM
+- * @exception: Which exception vector
+- * @error_code: Exception error codes
+- * @fault_gpa: Fault GPA (guest physical address or IPA in ARM)
+- * @reserved: Future-proof reservation and reset to zero in hypervisor.
+- *            Fill up to the union size, 256 bytes.
+  * @hypercall: The nested struct in anonymous union.
+  *             Some hypercalls issued from VM must be handled
+- * @args: The hypercall's arguments
+  * @internal: The nested struct in anonymous union. The errors from hypervisor
+- * @suberror: The errors codes about GZVM_EXIT_INTERNAL_ERROR
+- * @ndata: The number of elements used in data[]
+- * @data: Keep the detailed information about GZVM_EXIT_INTERNAL_ERROR
+  * @system_event: The nested struct in anonymous union.
+  *                VM's PSCI must be handled by host
+- * @type: System event type.
+- *        Ex. GZVM_SYSTEM_EVENT_SHUTDOWN or GZVM_SYSTEM_EVENT_RESET...etc.
+- * @ndata: The number of elements used in data[]
+- * @data: Keep the detailed information about GZVM_EXIT_SYSTEM_EVENT
+  * @padding: Fix it to a reasonable size future-proof for keeping the same
+  *           struct size when adding new variables in the union is needed
+  *
+@@ -252,36 +238,57 @@
+ 	union {
+ 		/* GZVM_EXIT_MMIO */
+ 		struct {
+-			/* from FAR_EL2 */
++			/* From FAR_EL2 */
++			/* The address guest tries to access */
+ 			__u64 phys_addr;
++			/* The value to be written (is_write is 1) or
++			 * be filled by user for reads (is_write is 0)
++			 */
+ 			__u8 data[8];
+-			/* from ESR_EL2 as */
++			/* From ESR_EL2 as */
++			/* The size of written data.
++			 * Only the first `size` bytes of `data` are handled
++			 */
+ 			__u64 size;
+-			/* from ESR_EL2 */
++			/* From ESR_EL2 */
++			/* The register number where the data is stored */
+ 			__u32 reg_nr;
+-			/* from ESR_EL2 */
++			/* From ESR_EL2 */
++			/* 1 for VM to perform a write or 0 for VM to perform a read */
+ 			__u8 is_write;
+ 		} mmio;
+ 		/* GZVM_EXIT_FAIL_ENTRY */
+ 		struct {
++			/* The reason codes about hardware entry failure */
+ 			__u64 hardware_entry_failure_reason;
++			/* The current processor number via smp_processor_id() */
+ 			__u32 cpu;
+ 		} fail_entry;
+ 		/* GZVM_EXIT_EXCEPTION */
+ 		struct {
++			/* Which exception vector */
+ 			__u32 exception;
++			/* Exception error codes */
+ 			__u32 error_code;
++			/* Fault GPA (guest physical address or IPA in ARM) */
+ 			__u64 fault_gpa;
++			/* Future-proof reservation and reset to zero in hypervisor.
++			 * Fill up to the union size, 256 bytes.
++			 */
+ 			__u64 reserved[30];
+ 		} exception;
+ 		/* GZVM_EXIT_HYPERCALL */
+ 		struct {
++			/* The hypercall's arguments */
+ 			__u64 args[8];	/* in-out */
+ 		} hypercall;
+ 		/* GZVM_EXIT_INTERNAL_ERROR */
+ 		struct {
++			/* The errors codes about GZVM_EXIT_INTERNAL_ERROR */
+ 			__u32 suberror;
++			/* The number of elements used in data[] */
+ 			__u32 ndata;
++			/* Keep the detailed information about GZVM_EXIT_SYSTEM_EVENT */
+ 			__u64 data[16];
+ 		} internal;
+ 		/* GZVM_EXIT_SYSTEM_EVENT */
+@@ -293,8 +300,13 @@
+ #define GZVM_SYSTEM_EVENT_SUSPEND        5
+ #define GZVM_SYSTEM_EVENT_SEV_TERM       6
+ #define GZVM_SYSTEM_EVENT_S2IDLE         7
++			/* System event type.
++			 * Ex. GZVM_SYSTEM_EVENT_SHUTDOWN or GZVM_SYSTEM_EVENT_RESET...etc.
++			 */
+ 			__u32 type;
++			/* The number of elements used in data[] */
+ 			__u32 ndata;
++			/* Keep the detailed information about GZVM_EXIT_SYSTEM_EVENT */
+ 			__u64 data[16];
+ 		} system_event;
+ 		char padding[256];
