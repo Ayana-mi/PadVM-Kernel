@@ -75,6 +75,8 @@ class StagedBuildTests(unittest.TestCase):
         self.assertIn('reserved[6] carries the guest ESR',patch)
         self.assertIn('GZVM_EXIT_IPI',patch)
         self.assertIn('pin_user_pages(hva, 1, flags, &page, NULL)',patch)
+        self.assertIn('ARM_SMCCC_CALL_VAL(ARM_SMCCC_FAST_CALL, ARM_SMCCC_SMC_32,',patch)
+        self.assertIn('older GZ firmware; any failure keeps the default',patch)
         self.assertNotRegex(patch,r'\d{4}-\d{2}-\d{2} \d{2}:\d{2}')
         script=(ROOT/'scripts/build.sh').read_text()
         self.assertIn('padvm-gzvm-backport-6.6.patch',script)

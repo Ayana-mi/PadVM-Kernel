@@ -20,7 +20,7 @@ diff -ruN a/arch/arm64/geniezone/gzvm_arch_common.h b/arch/arm64/geniezone/gzvm_
  
  enum {
  	GZVM_FUNC_CREATE_VM = 0,
-@@ -26,13 +27,14 @@
+@@ -26,11 +27,17 @@
  	GZVM_FUNC_SET_DTB_CONFIG = 16,
  	GZVM_FUNC_MAP_GUEST = 17,
  	GZVM_FUNC_MAP_GUEST_BLOCK = 18,
@@ -30,13 +30,15 @@ diff -ruN a/arch/arm64/geniezone/gzvm_arch_common.h b/arch/arm64/geniezone/gzvm_
  
  #define SMC_ENTITY_MTK			59
  #define GZVM_FUNCID_START		(0x1000)
++/*
++ * PadVM: the OPD2407 GZ firmware (GZ_hypervisor 3.2.0.049, Jan 2025) only
++ * defines the SMC32-encoded function IDs (0xbb00xxxx); it reports
++ * "Undefined hvc=0xfb00100c" for the SMC64 encoding used by android15-6.6.
++ */
  #define GZVM_HCALL_ID(func)						\
--	ARM_SMCCC_CALL_VAL(ARM_SMCCC_FAST_CALL, ARM_SMCCC_SMC_32,	\
-+	ARM_SMCCC_CALL_VAL(ARM_SMCCC_FAST_CALL, ARM_SMCCC_SMC_64,	\
+ 	ARM_SMCCC_CALL_VAL(ARM_SMCCC_FAST_CALL, ARM_SMCCC_SMC_32,	\
  			   SMC_ENTITY_MTK, (GZVM_FUNCID_START + (func)))
- 
- #define MT_HVC_GZVM_CREATE_VM		GZVM_HCALL_ID(GZVM_FUNC_CREATE_VM)
-@@ -52,35 +54,29 @@
+@@ -52,35 +59,29 @@
  #define MT_HVC_GZVM_SET_DTB_CONFIG	GZVM_HCALL_ID(GZVM_FUNC_SET_DTB_CONFIG)
  #define MT_HVC_GZVM_MAP_GUEST		GZVM_HCALL_ID(GZVM_FUNC_MAP_GUEST)
  #define MT_HVC_GZVM_MAP_GUEST_BLOCK	GZVM_HCALL_ID(GZVM_FUNC_MAP_GUEST_BLOCK)
@@ -86,7 +88,7 @@ diff -ruN a/arch/arm64/geniezone/gzvm_arch_common.h b/arch/arm64/geniezone/gzvm_
  
  /**
   * struct gzvm_vcpu_hwstate: Sync architecture state back to host for handling
-@@ -88,6 +84,12 @@
+@@ -88,6 +89,12 @@
   * @__pad: add an explicit '__u32 __pad;' in the middle to make it clear
   *         what the actual layout is.
   * @lr: The array of LRs(list registers).
@@ -99,7 +101,7 @@ diff -ruN a/arch/arm64/geniezone/gzvm_arch_common.h b/arch/arm64/geniezone/gzvm_
   *
   * - Keep the same layout of hypervisor data struct.
   * - Sync list registers back for acking virtual device interrupt status.
-@@ -96,19 +98,23 @@
+@@ -96,19 +103,23 @@
  	__le32 nr_lrs;
  	__le32 __pad;
  	__le64 lr[GIC_V3_NR_LRS];
@@ -1145,7 +1147,7 @@ diff -ruN a/drivers/virt/geniezone/gzvm_main.c b/drivers/virt/geniezone/gzvm_mai
  };
  
  static struct miscdevice gzvm_dev = {
-@@ -97,31 +243,97 @@
+@@ -97,31 +243,103 @@
  	.fops = &gzvm_chardev_ops,
  };
  
@@ -1165,9 +1167,11 @@ diff -ruN a/drivers/virt/geniezone/gzvm_main.c b/drivers/virt/geniezone/gzvm_mai
 +	 * We have initialized demand_paging_batch_pages, and to maintain
 +	 * compatibility with older GZ version, we can ignore the return value.
 +	 */
-+	if (ret == -EINVAL)
-+		return 0;
-+	return ret;
++	if (ret)
++		pr_info("gzvm: hyp batch pages query unsupported (%d), using %u\n",
++			ret, gzvm_drv.demand_paging_batch_pages);
++	/* PadVM: older GZ firmware; any failure keeps the default. */
++	return 0;
 +}
 +
 +static int gzvm_query_destroy_batch_pages(void)
@@ -1181,7 +1185,11 @@ diff -ruN a/drivers/virt/geniezone/gzvm_main.c b/drivers/virt/geniezone/gzvm_mai
 +	ret = gzvm_arch_query_destroy_batch_pages(&cap, NULL);
 +	if (!ret)
 +		gzvm_drv.destroy_batch_pages = cap.args[0];
-+	return ret;
++	else
++		pr_info("gzvm: destroy batch pages query unsupported (%d), using %u\n",
++			ret, gzvm_drv.destroy_batch_pages);
++	/* PadVM: older GZ firmware; any failure keeps the default. */
++	return 0;
 +}
 +
  static int gzvm_drv_probe(struct platform_device *pdev)
@@ -1246,7 +1254,7 @@ diff -ruN a/drivers/virt/geniezone/gzvm_main.c b/drivers/virt/geniezone/gzvm_mai
  	{ .compatible = "mediatek,geniezone-hyp" },
  	{/* sentinel */},
  };
-@@ -131,12 +343,64 @@
+@@ -131,12 +349,64 @@
  	.remove = gzvm_drv_remove,
  	.driver = {
  		.name = KBUILD_MODNAME,
