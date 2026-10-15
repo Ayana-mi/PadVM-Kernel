@@ -1,14 +1,3 @@
-diff -ruN a/arch/arm64/geniezone/Makefile b/arch/arm64/geniezone/Makefile
---- a/arch/arm64/geniezone/Makefile
-+++ b/arch/arm64/geniezone/Makefile
-@@ -4,6 +4,6 @@
- #
- include $(srctree)/drivers/virt/geniezone/Makefile
- 
--gzvm-y += vm.o vcpu.o vgic.o
-+gzvm-y += vm.o vcpu.o vgic.o hvc.o
- 
- obj-$(CONFIG_MTK_GZVM) += gzvm.o
 diff -ruN a/arch/arm64/geniezone/gzvm_arch_common.h b/arch/arm64/geniezone/gzvm_arch_common.h
 --- a/arch/arm64/geniezone/gzvm_arch_common.h
 +++ b/arch/arm64/geniezone/gzvm_arch_common.h
@@ -209,6 +198,17 @@ diff -ruN a/arch/arm64/geniezone/hvc.c b/arch/arm64/geniezone/hvc.c
 +	}
 +	return false;
 +}
+diff -ruN a/arch/arm64/geniezone/Makefile b/arch/arm64/geniezone/Makefile
+--- a/arch/arm64/geniezone/Makefile
++++ b/arch/arm64/geniezone/Makefile
+@@ -4,6 +4,6 @@
+ #
+ include $(srctree)/drivers/virt/geniezone/Makefile
+ 
+-gzvm-y += vm.o vcpu.o vgic.o
++gzvm-y += vm.o vcpu.o vgic.o hvc.o
+ 
+ obj-$(CONFIG_MTK_GZVM) += gzvm.o
 diff -ruN a/arch/arm64/geniezone/vcpu.c b/arch/arm64/geniezone/vcpu.c
 --- a/arch/arm64/geniezone/vcpu.c
 +++ b/arch/arm64/geniezone/vcpu.c
@@ -713,18 +713,6 @@ diff -ruN a/arch/arm64/geniezone/vm.c b/arch/arm64/geniezone/vm.c
 +	gzvm->stat.protected_shared_mem = ((ret == 0) ? res.a2 : 0);
 +	return ret;
 +}
-diff -ruN a/drivers/virt/geniezone/Kconfig b/drivers/virt/geniezone/Kconfig
---- a/drivers/virt/geniezone/Kconfig
-+++ b/drivers/virt/geniezone/Kconfig
-@@ -2,7 +2,7 @@
- 
- config MTK_GZVM
- 	tristate "GenieZone Hypervisor driver for guest VM operation"
--	depends on ARM64
-+	depends on ARM64 && EVENTFD
- 	help
- 	  This driver, gzvm, enables to run guest VMs on MTK GenieZone
- 	  hypervisor. It exports kvm-like interfaces for VMM (e.g., crosvm) in
 diff -ruN a/drivers/virt/geniezone/gzvm_exception.c b/drivers/virt/geniezone/gzvm_exception.c
 --- a/drivers/virt/geniezone/gzvm_exception.c
 +++ b/drivers/virt/geniezone/gzvm_exception.c
@@ -2142,9 +2130,9 @@ diff -ruN a/drivers/virt/geniezone/gzvm_vm.c b/drivers/virt/geniezone/gzvm_vm.c
 +
 +	/* No need to lock here becauese it's single-threaded execution */
 +	gzvm_destroy_all_ppage(gzvm);
- 
-+	gzvm_destroy_vm_debugfs(gzvm);
 +
++	gzvm_destroy_vm_debugfs(gzvm);
+ 
 +	mmdrop(gzvm->mm);
  	kfree(gzvm);
  }
@@ -2208,7 +2196,7 @@ diff -ruN a/drivers/virt/geniezone/gzvm_vm.c b/drivers/virt/geniezone/gzvm_vm.c
  	if (ret == 0) {
  		vm->demand_page_gran = GZVM_BLOCK_BASED_DEMAND_PAGE_SIZE;
  		/* freed when destroy vm */
-@@ -389,7 +489,141 @@
+@@ -389,7 +489,152 @@
  	}
  }
  
@@ -2329,7 +2317,18 @@ diff -ruN a/drivers/virt/geniezone/gzvm_vm.c b/drivers/virt/geniezone/gzvm_vm.c
 +		vm->mem_alloc_mode = GZVM_DEMAND_PAGING;
 +		setup_vm_demand_paging(vm);
 +	} else {
-+		vm->mem_alloc_mode = GZVM_FULLY_POPULATED;
++		/*
++		 * PadVM: GZ 3.2 (OPD2407) does not know this capability but always
++		 * reports stage-2 faults and expects the host to map pages one by one,
++		 * as the 6.1 driver did. Pre-populating instead leaves every guest
++		 * fault unhandled ("vcpu hit unknown error: Invalid argument" in
++		 * crosvm), so keep single-page demand paging.
++		 */
++		pr_info("gzvm: VM-%u demand paging cap unsupported (%d), using single-page demand paging\n",
++			vm->vm_id, ret);
++		vm->mem_alloc_mode = GZVM_DEMAND_PAGING;
++		vm->demand_page_gran = PAGE_SIZE;
++		vm->demand_page_buffer = NULL;
 +	}
 +
 +	return 0;
@@ -2351,7 +2350,7 @@ diff -ruN a/drivers/virt/geniezone/gzvm_vm.c b/drivers/virt/geniezone/gzvm_vm.c
  {
  	int ret;
  	struct gzvm *gzvm;
-@@ -404,11 +638,14 @@
+@@ -404,11 +649,14 @@
  		return ERR_PTR(ret);
  	}
  
@@ -2367,7 +2366,7 @@ diff -ruN a/drivers/virt/geniezone/gzvm_vm.c b/drivers/virt/geniezone/gzvm_vm.c
  	ret = gzvm_vm_irqfd_init(gzvm);
  	if (ret) {
  		pr_err("Failed to initialize irqfd\n");
-@@ -423,46 +660,58 @@
+@@ -423,46 +671,58 @@
  		return ERR_PTR(ret);
  	}
  
@@ -2445,6 +2444,18 @@ diff -ruN a/drivers/virt/geniezone/gzvm_vm.c b/drivers/virt/geniezone/gzvm_vm.c
 -	mutex_unlock(&gzvm_list_lock);
 +	return ret;
  }
+diff -ruN a/drivers/virt/geniezone/Kconfig b/drivers/virt/geniezone/Kconfig
+--- a/drivers/virt/geniezone/Kconfig
++++ b/drivers/virt/geniezone/Kconfig
+@@ -2,7 +2,7 @@
+ 
+ config MTK_GZVM
+ 	tristate "GenieZone Hypervisor driver for guest VM operation"
+-	depends on ARM64
++	depends on ARM64 && EVENTFD
+ 	help
+ 	  This driver, gzvm, enables to run guest VMs on MTK GenieZone
+ 	  hypervisor. It exports kvm-like interfaces for VMM (e.g., crosvm) in
 diff -ruN a/include/linux/soc/mediatek/gzvm_drv.h b/include/linux/soc/mediatek/gzvm_drv.h
 --- a/include/linux/soc/mediatek/gzvm_drv.h
 +++ b/include/linux/soc/mediatek/gzvm_drv.h
