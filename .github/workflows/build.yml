@@ -45,7 +45,7 @@ jobs:
         if: success()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # pinned v4
         with:
-          name: PadVM-Kernel-experimental-0.3.2
+          name: PadVM-Kernel-experimental-0.4.0
           path: .build/artifact/
           retention-days: 30
           include-hidden-files: true # .config is a required, generated artifact

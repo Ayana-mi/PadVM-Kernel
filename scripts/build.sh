@@ -112,7 +112,7 @@ patch -d "$SRC" -p1 --batch --forward < "$ROOT/patches/pad-sysvipc-kabi.patch"
 # the disabled OPD2407 DT node and accepts firmware data in exception.reserved.
 patch -d "$SRC" -p1 --batch --forward < "$ROOT/patches/padvm-gzvm-backport-6.6.patch"
 CFG="$SRC/scripts/config"
-"$CFG" --file "$OUT/.config" --set-str LOCALVERSION '-android14-PADVM-0.3.2' --disable LOCALVERSION_AUTO
+"$CFG" --file "$OUT/.config" --set-str LOCALVERSION '-android14-PADVM-0.4.0' --disable LOCALVERSION_AUTO
 "$CFG" --file "$OUT/.config" --enable KSU --enable KSU_TRACEPOINT_HOOK --disable KSU_SUSFS --enable MTK_GZVM
 # VM host helpers: in-kernel virtio-net datapath and dma-buf from memfd (virtio-gpu blobs).
 "$CFG" --file "$OUT/.config" --enable VHOST_NET --enable UDMABUF
